@@ -2,7 +2,9 @@ import 'dart:async';
 
 import 'package:app_links/app_links.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:venera/foundation/app.dart';
+import 'package:venera/foundation/app_page_route.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/pages/comic_details_page/comic_page.dart';
@@ -66,6 +68,19 @@ AppLinkTarget? resolveAppLink(Uri uri, Iterable<AppLinkCandidate> candidates) {
   return null;
 }
 
+/// Navigator that currently hosts comic detail routes.
+///
+/// Do NOT use [GlobalKey.currentContext] + [Navigator.of]: that context belongs
+/// to the [Navigator] element and [Navigator.of] walks to a *parent* navigator,
+/// so the new page is pushed under the current comic (only visible after pop).
+NavigatorState? _navigatorForAppLinks() {
+  if (App.secondaryNavigatorActive) {
+    final secondary = App.secondaryNavigatorKey?.currentState;
+    if (secondary != null) return secondary;
+  }
+  return App.mainNavigatorKey?.currentState;
+}
+
 Future<bool> handleAppLink(Uri uri) async {
   final target = resolveAppLink(
     uri,
@@ -75,18 +90,33 @@ Future<bool> handleAppLink(Uri uri) async {
   );
   if (target == null) return false;
 
-  if (App.mainNavigatorKey?.currentContext == null) {
-    await Future.delayed(const Duration(milliseconds: 200));
-  }
-  // Prefer Search-tab nested navigator when active so back stack stays correct.
-  final context = (App.secondaryNavigatorActive
-          ? App.secondaryNavigatorKey?.currentContext
-          : null) ??
-      App.mainNavigatorKey?.currentContext;
-  if (context == null || !context.mounted) return false;
-  // Do not await route completion — only push.
-  context.to(() => ComicPage(id: target.comicId, sourceKey: target.sourceKey));
-  return true;
+  // Dismiss comment sidebars / dialogs first.
+  App.closeRootOverlays();
+
+  // Push on the next frame so pops are applied before the new route.
+  final completer = Completer<bool>();
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    try {
+      final nav = _navigatorForAppLinks();
+      if (nav == null) {
+        completer.complete(false);
+        return;
+      }
+      nav.push(
+        AppPageRoute(
+          builder: (_) => ComicPage(
+            id: target.comicId,
+            sourceKey: target.sourceKey,
+          ),
+        ),
+      );
+      completer.complete(true);
+    } catch (e, s) {
+      Log.error('App Link', e, s);
+      completer.complete(false);
+    }
+  });
+  return completer.future;
 }
 
 Future<void> _handleCapturedAppLink(Uri uri) async {

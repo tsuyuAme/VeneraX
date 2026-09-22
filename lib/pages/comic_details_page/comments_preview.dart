@@ -92,7 +92,7 @@ class _CommentsPartState extends State<_CommentsPart> {
             mainAxisSize: MainAxisSize.min,
             children: [
               SizedBox(
-                height: 188,
+                height: 220,
                 child: MediaQuery.removePadding(
                   removeTop: true,
                   context: context,
@@ -181,7 +181,8 @@ class _CommentWidget extends StatelessWidget {
               physics: const ClampingScrollPhysics(),
               child: RichCommentContent(
                 text: comment.content,
-                showImages: false,
+                // Show linked thumbnails (EH image-as-link comments).
+                showImages: true,
                 // Horizontal list: avoid SelectableText stealing link taps.
                 selectable: false,
               ),

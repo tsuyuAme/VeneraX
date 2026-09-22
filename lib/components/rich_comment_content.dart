@@ -347,25 +347,37 @@ class _RichCommentContentState extends State<RichCommentContent> {
             runSpacing: 4,
             spacing: 4,
             children: images.map((e) {
+              final size = widget.selectable ? 100.0 : 72.0;
               Widget image = Container(
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(8),
                   color: Theme.of(context).colorScheme.surfaceContainerLow,
                 ),
-                width: 100,
-                height: 100,
+                width: size,
+                height: size,
+                clipBehavior: Clip.antiAlias,
                 child: Image(
-                  width: 100,
-                  height: 100,
+                  width: size,
+                  height: size,
+                  fit: BoxFit.cover,
                   image: CachedImageProvider(e.url),
                 ),
               );
-              if (e.link != null) {
-                image = InkWell(
-                  onTap: () {
-                    _Tag.handleLink(e.link!);
-                  },
-                  child: image,
+              // Prefer explicit <a href>, else try opening the image URL itself
+              // when it is a gallery/cover host page (rare).
+              final tapLink = e.link ??
+                  (e.url.isURL && e.url.contains('hentai.org/g/')
+                      ? e.url
+                      : null);
+              if (tapLink != null) {
+                image = Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: () {
+                      _Tag.handleLink(tapLink);
+                    },
+                    child: image,
+                  ),
                 );
               }
               return image;
