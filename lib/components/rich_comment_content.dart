@@ -103,8 +103,8 @@ class _Tag {
     }
     var recognizer = s.recognizer;
     if (name == 'a') {
-      var link = attributes['href'];
-      if (link != null && link.isURL) {
+      final link = resolveHref(attributes['href']);
+      if (link != null) {
         recognizer = TapGestureRecognizer()
           ..onTap = () {
             handleLink(link);
@@ -114,14 +114,43 @@ class _Tag {
     return TextSpan(text: s.text, style: style, recognizer: recognizer);
   }
 
-  static void handleLink(String link) async {
-    if (link.isURL) {
-      if (await handleAppLink(Uri.parse(link))) {
-        Navigator.of(App.rootContext).maybePop();
-      } else {
-        launchUrlString(link);
-      }
+  /// EH-style relative / protocol-relative hrefs → absolute https URLs.
+  static String? resolveHref(String? href) {
+    if (href == null) return null;
+    var link = href.trim();
+    if (link.isEmpty ||
+        link.startsWith('#') ||
+        link.toLowerCase().startsWith('javascript:')) {
+      return null;
     }
+    if (link.startsWith('//')) {
+      link = 'https:$link';
+    } else if (link.startsWith('/')) {
+      link = 'https://exhentai.org$link';
+    }
+    if (link.isURL) return link;
+    if (RegExp(
+      r'^https?://(e-|ex)hentai\.org/',
+      caseSensitive: false,
+    ).hasMatch(link)) {
+      return link;
+    }
+    return null;
+  }
+
+  static void handleLink(String link) async {
+    final resolved = resolveHref(link) ?? (link.isURL ? link : null);
+    if (resolved == null) return;
+    final uri = Uri.tryParse(resolved);
+    if (uri == null) return;
+    // Close comment sidebars first so the new page is not buried under them.
+    App.closeRootOverlays();
+    if (await handleAppLink(uri)) {
+      return;
+    }
+    try {
+      await launchUrlString(resolved);
+    } catch (_) {}
   }
 }
 
@@ -138,6 +167,7 @@ class RichCommentContent extends StatefulWidget {
     required this.text,
     this.showImages = true,
     this.fontSize,
+    this.selectable = true,
   });
 
   final String text;
@@ -147,6 +177,9 @@ class RichCommentContent extends StatefulWidget {
   /// Explicit font size for the comment body. When null, inherits the ambient
   /// [DefaultTextStyle] (used by compact previews that must not scale).
   final double? fontSize;
+
+  /// Prefer false inside horizontal lists so link taps are not stolen.
+  final bool selectable;
 
   @override
   State<RichCommentContent> createState() => _RichCommentContentState();
@@ -301,9 +334,10 @@ class _RichCommentContentState extends State<RichCommentContent> {
     if (widget.fontSize != null) {
       baseStyle = baseStyle.copyWith(fontSize: widget.fontSize);
     }
-    Widget content = SelectableText.rich(
-      TextSpan(style: baseStyle, children: textSpan),
-    );
+    final span = TextSpan(style: baseStyle, children: textSpan);
+    Widget content = widget.selectable
+        ? SelectableText.rich(span)
+        : Text.rich(span);
     if (images.isNotEmpty && widget.showImages) {
       content = Column(
         mainAxisSize: MainAxisSize.min,

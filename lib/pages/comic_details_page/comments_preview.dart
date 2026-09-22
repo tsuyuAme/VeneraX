@@ -16,6 +16,9 @@ class _CommentsPartState extends State<_CommentsPart> {
 
   late List<Comment> comments;
 
+  /// One comment card width + margin. Used for multi-step chevron jumps.
+  double _itemExtent = 332;
+
   @override
   void initState() {
     comments = widget.comments.where((c) => !_shouldBlockComment(c)).toList();
@@ -28,6 +31,12 @@ class _CommentsPartState extends State<_CommentsPart> {
     super.dispose();
   }
 
+  /// Phone: 1 card; desktop: 4 cards per chevron click.
+  int get _scrollStepCount {
+    final wide = MediaQuery.sizeOf(context).width >= 600;
+    return wide ? 4 : 1;
+  }
+
   void _scrollBy(double delta) {
     if (!scrollController.hasClients) return;
     final target = (scrollController.position.pixels + delta).clamp(
@@ -36,7 +45,7 @@ class _CommentsPartState extends State<_CommentsPart> {
     );
     scrollController.animateTo(
       target,
-      duration: const Duration(milliseconds: 200),
+      duration: const Duration(milliseconds: 280),
       curve: Curves.easeOutCubic,
     );
   }
@@ -47,6 +56,8 @@ class _CommentsPartState extends State<_CommentsPart> {
       return const SliverPadding(padding: EdgeInsets.zero);
     }
     final cardWidth = math.min(324.0, math.max(240.0, context.width - 56));
+    _itemExtent = cardWidth + 8;
+    final step = _itemExtent * _scrollStepCount;
     return MultiSliver(
       children: [
         SliverLazyToBoxAdapter(
@@ -60,12 +71,12 @@ class _CommentsPartState extends State<_CommentsPart> {
                   IconButton(
                     tooltip: "Previous".tl,
                     icon: const Icon(Icons.chevron_left_rounded),
-                    onPressed: () => _scrollBy(-cardWidth - 8),
+                    onPressed: () => _scrollBy(-step),
                   ),
                   IconButton(
                     tooltip: "Next".tl,
                     icon: const Icon(Icons.chevron_right_rounded),
-                    onPressed: () => _scrollBy(cardWidth + 8),
+                    onPressed: () => _scrollBy(step),
                   ),
                 ],
                 TextButton(
@@ -85,9 +96,24 @@ class _CommentsPartState extends State<_CommentsPart> {
                 child: MediaQuery.removePadding(
                   removeTop: true,
                   context: context,
-                  child: ListView.builder(
+                  child: ScrollConfiguration(
+                    behavior: ScrollConfiguration.of(context).copyWith(
+                      // Enable mouse drag-to-scroll on desktop.
+                      dragDevices: {
+                        PointerDeviceKind.touch,
+                        PointerDeviceKind.mouse,
+                        PointerDeviceKind.trackpad,
+                        PointerDeviceKind.stylus,
+                      },
+                    ),
+                    child: ListView.builder(
                     controller: scrollController,
                     scrollDirection: Axis.horizontal,
+                    // Desktop: allow click-drag + mouse wheel / trackpad.
+                    primary: false,
+                    physics: const AlwaysScrollableScrollPhysics(
+                      parent: BouncingScrollPhysics(),
+                    ),
                     padding: const EdgeInsets.symmetric(horizontal: 4),
                     itemCount: comments.length,
                     itemBuilder: (context, index) {
@@ -96,6 +122,7 @@ class _CommentsPartState extends State<_CommentsPart> {
                         width: cardWidth,
                       );
                     },
+                  ),
                   ),
                 ),
               ),
@@ -150,10 +177,15 @@ class _CommentWidget extends StatelessWidget {
           ),
           const SizedBox(height: 4),
           Expanded(
-            child: RichCommentContent(
-              text: comment.content,
-              showImages: false,
-            ).fixWidth(width - 32),
+            child: SingleChildScrollView(
+              physics: const ClampingScrollPhysics(),
+              child: RichCommentContent(
+                text: comment.content,
+                showImages: false,
+                // Horizontal list: avoid SelectableText stealing link taps.
+                selectable: false,
+              ),
+            ),
           ),
           const SizedBox(height: 4),
           if (comment.time != null)

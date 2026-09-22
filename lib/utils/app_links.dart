@@ -78,8 +78,13 @@ Future<bool> handleAppLink(Uri uri) async {
   if (App.mainNavigatorKey?.currentContext == null) {
     await Future.delayed(const Duration(milliseconds: 200));
   }
-  final context = App.mainNavigatorKey?.currentContext;
-  if (context == null) return false;
+  // Prefer Search-tab nested navigator when active so back stack stays correct.
+  final context = (App.secondaryNavigatorActive
+          ? App.secondaryNavigatorKey?.currentContext
+          : null) ??
+      App.mainNavigatorKey?.currentContext;
+  if (context == null || !context.mounted) return false;
+  // Do not await route completion — only push.
   context.to(() => ComicPage(id: target.comicId, sourceKey: target.sourceKey));
   return true;
 }

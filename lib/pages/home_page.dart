@@ -461,7 +461,7 @@ class _SearchBar extends StatelessWidget {
               child: AppSearchField(
                 height: height,
                 onTap: () {
-                  context.to(() => const SearchPage());
+                  NaviPane.of(context).currentPage = 1; // Search tab
                 },
               ),
             ),

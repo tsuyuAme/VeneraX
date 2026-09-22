@@ -71,6 +71,12 @@ class _App {
 
   GlobalKey<NavigatorState>? mainNavigatorKey;
 
+  /// Nested tab navigators (Search tab). Used when [secondaryNavigatorActive].
+  GlobalKey<NavigatorState>? secondaryNavigatorKey;
+
+  /// True while the Search tab (owner of [secondaryNavigatorKey]) is visible.
+  bool secondaryNavigatorActive = false;
+
   BuildContext get rootContext => rootNavigatorKey.currentContext!;
 
   final Appdata data = appdata;
@@ -90,10 +96,29 @@ class _App {
   }
 
   void pop() {
+    // Root overlays (sidebars, dialogs) first.
     if (rootNavigatorKey.currentState?.canPop() ?? false) {
       rootNavigatorKey.currentState?.pop();
-    } else if (mainNavigatorKey?.currentState?.canPop() ?? false) {
-      mainNavigatorKey?.currentState?.pop();
+      return;
+    }
+    // Main shell routes (settings, pages pushed without tab context).
+    if (mainNavigatorKey?.currentState?.canPop() ?? false) {
+      mainNavigatorKey!.currentState!.pop();
+      return;
+    }
+    // Search nested stack while that tab is selected.
+    if (secondaryNavigatorActive &&
+        (secondaryNavigatorKey?.currentState?.canPop() ?? false)) {
+      secondaryNavigatorKey!.currentState!.pop();
+    }
+  }
+
+  /// Close every route above the shell on the root navigator (comment sidebars…).
+  void closeRootOverlays() {
+    final nav = rootNavigatorKey.currentState;
+    if (nav == null) return;
+    while (nav.canPop()) {
+      nav.pop();
     }
   }
 

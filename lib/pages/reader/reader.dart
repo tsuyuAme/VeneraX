@@ -1018,6 +1018,7 @@ abstract mixin class _ReaderLocation {
       // handles the jump we're done. Otherwise fall through to the remount path.
       if (_imageViewController?.jumpToChapter(c, toLastPage: toLastPage) ==
           true) {
+        _hideBarsAfterChapterChange();
         return true;
       }
       chapter = c;
@@ -1025,9 +1026,25 @@ abstract mixin class _ReaderLocation {
       _jumpToLastPageOnLoad = toLastPage;
       chapterJumpNonce++;
       update();
+      _hideBarsAfterChapterChange();
       return true;
     }
     return false;
+  }
+
+  /// After switching chapters, collapse the reader chrome so the new chapter
+  /// starts immersive (user can tap to show bars again).
+  void _hideBarsAfterChapterChange() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      try {
+        final scaffold =
+            context.findAncestorStateOfType<_ReaderScaffoldState>();
+        if (scaffold != null && scaffold.isOpen) {
+          scaffold.openOrClose();
+        }
+      } catch (_) {}
+    });
   }
 
   Timer? autoPageTurningTimer;

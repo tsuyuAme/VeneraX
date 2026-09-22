@@ -193,11 +193,24 @@ class NaviPaneState extends State<NaviPane>
         : EdgeInsets.zero;
     return _NaviPopScope(
       action: () {
-        if (App.mainNavigatorKey!.currentState!.canPop()) {
-          App.mainNavigatorKey!.currentState!.maybePop();
-        } else {
-          SystemNavigator.pop();
+        final root = App.rootNavigatorKey.currentState;
+        if (root != null && root.canPop()) {
+          root.pop();
+          return;
         }
+        final main = App.mainNavigatorKey?.currentState;
+        if (main != null && main.canPop()) {
+          main.maybePop();
+          return;
+        }
+        if (App.secondaryNavigatorActive) {
+          final secondary = App.secondaryNavigatorKey?.currentState;
+          if (secondary != null && secondary.canPop()) {
+            secondary.pop();
+            return;
+          }
+        }
+        SystemNavigator.pop();
       },
       popGesture: App.isIOS && context.width >= changePoint,
       child: AnimatedBuilder(
@@ -234,10 +247,19 @@ class NaviPaneState extends State<NaviPane>
     return HeroControllerScope(
       controller: MaterialApp.createMaterialHeroController(),
       child: PopScope(
-        canPop: _canPop,
+        canPop: _canPop &&
+            !(App.secondaryNavigatorActive &&
+                (App.secondaryNavigatorKey?.currentState?.canPop() ?? false)),
         onPopInvokedWithResult: (didPop, result) {
           if (didPop) {
             return;
+          }
+          if (App.secondaryNavigatorActive) {
+            final secondary = App.secondaryNavigatorKey?.currentState;
+            if (secondary != null && secondary.canPop()) {
+              secondary.maybePop(result);
+              return;
+            }
           }
           widget.navigatorKey.currentState?.maybePop(result);
         },

@@ -1210,6 +1210,10 @@ class _ContinuousModeState extends State<_ContinuousMode>
       reader.images = images;
       reader.page = entry.page;
       context.readerScaffold.update();
+      // Match discrete toChapter: auto-hide chrome on chapter boundary.
+      if (context.readerScaffold.isOpen) {
+        context.readerScaffold.openOrClose();
+      }
     } else if (entry.page != reader.page) {
       reader.setPage(entry.page);
       context.readerScaffold.update();
@@ -2252,6 +2256,9 @@ class _ContinuousModeState extends State<_ContinuousMode>
     reader.chapter = chapter;
     reader.page = targetPage;
     context.readerScaffold.update();
+    if (context.readerScaffold.isOpen) {
+      context.readerScaffold.openOrClose();
+    }
     final animate = reader.enablePageAnimation(reader.cid, reader.type);
     _futurePosition = null;
     _goToEntry(chapter, targetPage, animate: animate);
