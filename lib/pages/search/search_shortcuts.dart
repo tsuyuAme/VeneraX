@@ -503,39 +503,44 @@ class _SearchShortcutsSliverState extends State<SearchShortcutsSliver> {
         ComicSource.find(shortcut.sourceKey)?.name ?? shortcut.sourceKey;
     return Builder(
       builder: (itemContext) {
-        return ListTile(
-          contentPadding: EdgeInsets.zero,
-          dense: true,
-          title: Text(shortcut.value, maxLines: 1, overflow: TextOverflow.ellipsis),
-          subtitle: Text(
-            shortcut.isAuthor
-                ? '${'Author'.tl} · $sourceName'
-                : '${shortcut.namespace} · $sourceName',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
+        void showMenuAt(Offset globalPosition) {
+          showSearchShortcutMenu(
+            context: itemContext,
+            location: globalPosition,
+            copyText: shortcut.value,
+            shortcut: shortcut,
+          );
+        }
+
+        return GestureDetector(
+          onSecondaryTapUp: (details) => showMenuAt(details.globalPosition),
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            title: Text(
+              shortcut.value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            subtitle: Text(
+              shortcut.isAuthor
+                  ? '${'Author'.tl} · $sourceName'
+                  : '${shortcut.namespace} · $sourceName',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            onTap: () => openSearchShortcut(itemContext, shortcut),
+            onLongPress: () {
+              final box = itemContext.findRenderObject() as RenderBox;
+              final offset = box.localToGlobal(Offset.zero);
+              showMenuAt(
+                Offset(
+                  offset.dx + box.size.width / 2 - 121,
+                  offset.dy + box.size.height - 8,
+                ),
+              );
+            },
           ),
-          onTap: () => openSearchShortcut(itemContext, shortcut),
-          onLongPress: () {
-            final box = itemContext.findRenderObject() as RenderBox;
-            final offset = box.localToGlobal(Offset.zero);
-            showSearchShortcutMenu(
-              context: itemContext,
-              location: Offset(
-                offset.dx + box.size.width / 2 - 121,
-                offset.dy + box.size.height - 8,
-              ),
-              copyText: shortcut.value,
-              shortcut: shortcut,
-            );
-          },
-          onSecondaryTapUp: (details) {
-            showSearchShortcutMenu(
-              context: itemContext,
-              location: details.globalPosition,
-              copyText: shortcut.value,
-              shortcut: shortcut,
-            );
-          },
         );
       },
     );

@@ -114,17 +114,19 @@ class _ArtistFavoritesPageState extends State<ArtistFavoritesPage> {
                   final entry = list[index];
                   final name = entry.key;
                   final sources = entry.value.join(', ');
-                  return ListTile(
-                    title: Text(name),
-                    subtitle: Text(sources),
-                    trailing: IconButton(
-                      tooltip: 'Copy'.tl,
-                      icon: const Icon(Icons.copy, size: 20),
-                      onPressed: () => _copy(name),
-                    ),
-                    onTap: () => _openSearch(name),
-                    onLongPress: () => _remove(name),
+                  return GestureDetector(
                     onSecondaryTap: () => _remove(name),
+                    child: ListTile(
+                      title: Text(name),
+                      subtitle: Text(sources),
+                      trailing: IconButton(
+                        tooltip: 'Copy'.tl,
+                        icon: const Icon(Icons.copy, size: 20),
+                        onPressed: () => _copy(name),
+                      ),
+                      onTap: () => _openSearch(name),
+                      onLongPress: () => _remove(name),
+                    ),
                   );
                 },
                 childCount: list.length,
