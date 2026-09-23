@@ -225,7 +225,11 @@ class ComicStateRepository {
       localMeta?.status,
       currentMeta.status,
     ]);
-    final updateTime = _pick([
+    // Prefer the *newest* plausible date among sources. Follow-check stores
+    // last_update_time once; domain/detail may have a fresher updateTime after
+    // opening the comic. Taking the first non-null left stale dates on tiles
+    // (e.g. CopyManga showed favorite-check age instead of real update day).
+    final updateTime = _pickNewestDate([
       updateInfo?.updateTime,
       favorite?.lastUpdateTime,
       favorite?.updateTimeMeta,
