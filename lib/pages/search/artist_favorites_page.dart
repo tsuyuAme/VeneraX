@@ -4,6 +4,7 @@ import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/pages/aggregated_search_page.dart';
 import 'package:venera/pages/search/search_shortcuts.dart';
+import 'package:venera/pages/search/artist_batch_search_page.dart';
 import 'package:venera/utils/translations.dart';
 
 Map<String, Set<String>> groupArtistShortcuts(List<SearchShortcut> shortcuts) {
@@ -126,7 +127,18 @@ class _ArtistFavoritesPageState extends State<ArtistFavoritesPage> {
     return Scaffold(
       body: SmoothCustomScrollView(
         slivers: [
-          SliverAppbar(title: Text('Favorite authors'.tl)),
+          SliverAppbar(
+            title: Text('Favorite authors'.tl),
+            actions: [
+              Tooltip(
+                message: 'Search all authors'.tl,
+                child: IconButton(
+                  icon: const Icon(Icons.manage_search),
+                  onPressed: () => openArtistBatchSearch(context),
+                ),
+              ),
+            ],
+          ),
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),

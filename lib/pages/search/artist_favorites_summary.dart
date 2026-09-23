@@ -3,6 +3,7 @@ import 'package:venera/foundation/app.dart';
 import 'package:venera/pages/aggregated_search_page.dart';
 import 'package:venera/pages/search/artist_favorites_page.dart';
 import 'package:venera/pages/search/search_shortcuts.dart';
+import 'package:venera/pages/search/artist_batch_search_page.dart';
 import 'package:venera/utils/translations.dart';
 
 /// Home section body for favorited artists.
@@ -79,6 +80,11 @@ class _ArtistFavoritesHomeSectionState
                       context.to(() => AggregatedSearchPage(keyword: name));
                     },
                   ),
+                ActionChip(
+                  avatar: const Icon(Icons.manage_search, size: 18),
+                  label: Text('Search all'.tl),
+                  onPressed: () => openArtistBatchSearch(context),
+                ),
                 if (_count > _preview.length)
                   ActionChip(
                     avatar: const Icon(Icons.more_horiz, size: 18),
