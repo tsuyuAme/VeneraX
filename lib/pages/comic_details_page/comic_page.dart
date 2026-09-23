@@ -49,6 +49,7 @@ import 'package:venera/utils/io.dart';
 import 'package:venera/utils/local_comic_scanner.dart';
 import 'package:venera/utils/tags_translation.dart';
 import 'package:venera/utils/translations.dart';
+import 'package:venera/pages/search/search_shortcuts.dart';
 import 'dart:math' as math;
 
 part 'comments_page.dart';
@@ -1318,6 +1319,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     Widget buildTag({
       required String text,
       VoidCallback? onTap,
+      void Function(BuildContext ctx)? onAuthorOrTagLongPress,
       bool isTitle = false,
     }) {
       Color color;
@@ -1344,35 +1346,47 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       const padding = EdgeInsets.symmetric(horizontal: 16, vertical: 6);
 
       if (onTap != null) {
-        return Material(
-          color: color,
-          borderRadius: borderRadius,
-          child: InkWell(
-            borderRadius: borderRadius,
-            onTap: onTap,
-            onLongPress: () {
-              Clipboard.setData(ClipboardData(text: text));
-              context.showMessage(message: "Copied".tl);
-            },
-            onSecondaryTapDown: (details) {
-              showMenuX(context, details.globalPosition, [
-                MenuEntry(
-                  icon: Icons.remove_red_eye,
-                  text: "View".tl,
-                  onClick: onTap,
-                ),
-                MenuEntry(
-                  icon: Icons.copy,
-                  text: "Copy".tl,
-                  onClick: () {
+        return Builder(
+          builder: (tagContext) {
+            return Material(
+              color: color,
+              borderRadius: borderRadius,
+              child: InkWell(
+                borderRadius: borderRadius,
+                onTap: onTap,
+                onLongPress: () {
+                  if (onAuthorOrTagLongPress != null) {
+                    onAuthorOrTagLongPress(tagContext);
+                  } else {
                     Clipboard.setData(ClipboardData(text: text));
                     context.showMessage(message: "Copied".tl);
-                  },
-                ),
-              ]);
-            },
-            child: Text(text).padding(padding),
-          ),
+                  }
+                },
+                onSecondaryTapDown: (details) {
+                  if (onAuthorOrTagLongPress != null) {
+                    onAuthorOrTagLongPress(tagContext);
+                    return;
+                  }
+                  showMenuX(context, details.globalPosition, [
+                    MenuEntry(
+                      icon: Icons.remove_red_eye,
+                      text: "View".tl,
+                      onClick: onTap,
+                    ),
+                    MenuEntry(
+                      icon: Icons.copy,
+                      text: "Copy".tl,
+                      onClick: () {
+                        Clipboard.setData(ClipboardData(text: text));
+                        context.showMessage(message: "Copied".tl);
+                      },
+                    ),
+                  ]);
+                },
+                child: Text(text).padding(padding),
+              ),
+            );
+          },
         );
       } else {
         Widget tag = Container(
@@ -1457,6 +1471,8 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
                           )
                         : tag,
                     onTap: () => onTapTag(tag, e.key),
+                    onAuthorOrTagLongPress: (ctx) =>
+                        onLongPressTag(tag, e.key, ctx),
                   ),
               ],
             ),

@@ -467,6 +467,7 @@ class Settings with ChangeNotifier {
     'followUpdatesCheckOnStart': true,
     'followUpdatesFixedTime': '',
     'initialPage': '0',
+    'searchShortcuts': [],
     'comicListDisplayMode': 'paging', // paging, continuous
     'showPageNumberInReader': true,
     'showSingleImageOnFirstPage': false,

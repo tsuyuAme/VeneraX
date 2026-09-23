@@ -570,7 +570,40 @@ abstract mixin class _ComicPageActions {
     update();
   }
 
-  void onTapTag(String tag, String namespace) {
+  
+  void onLongPressTag(String tag, String namespace, BuildContext tagContext) {
+    final renderBox = tagContext.findRenderObject() as RenderBox?;
+    if (renderBox == null) return;
+    final offset = renderBox.localToGlobal(Offset.zero);
+    final source = comicSource;
+    final canSearch = source?.handleClickTagEvent != null ||
+        source?.searchPageData != null;
+    SearchShortcut? shortcut;
+    if (source != null && canSearch) {
+      final isAuthor = isAuthorNamespace(namespace);
+      final display = isAuthor
+          ? resolveAuthorFavoriteName(tag, namespace)
+          : tag;
+      shortcut = SearchShortcut(
+        kind: isAuthor ? SearchShortcutKind.author : SearchShortcutKind.tag,
+        sourceKey: source.key,
+        namespace: namespace,
+        value: display,
+        rawValue: display != tag ? tag : null,
+      );
+    }
+    showSearchShortcutMenu(
+      context: tagContext,
+      location: Offset(
+        offset.dx + renderBox.size.width / 2 - 121,
+        offset.dy + renderBox.size.height - 8,
+      ),
+      copyText: tag,
+      shortcut: shortcut,
+    );
+  }
+
+void onTapTag(String tag, String namespace) {
     final source = comicSource;
     var target = source?.handleClickTagEvent?.call(namespace, tag);
     var context = App.mainNavigatorKey!.currentContext!;
