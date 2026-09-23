@@ -227,6 +227,8 @@ class ComicStateRepository {
     ]);
     final updateTime = _pick([
       updateInfo?.updateTime,
+      favorite?.lastUpdateTime,
+      favorite?.updateTimeMeta,
       domain?.updateTime,
       currentMeta.updateTime,
       favoriteMeta?.updateTime,

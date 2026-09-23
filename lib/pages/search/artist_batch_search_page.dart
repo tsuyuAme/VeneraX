@@ -1,72 +1,39 @@
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
-import 'package:venera/foundation/res.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
+import 'package:venera/foundation/res.dart';
 import 'package:venera/pages/search/search_shortcuts.dart';
 import 'package:venera/utils/translations.dart';
 
-/// Search every favorited author once and merge results into a single list
-/// (similar to JHentai "followed tags" combined query).
+/// Search favorited authors and merge results into one list.
 ///
-/// E-Hentai does not support OR across artists in one `f_search`, so we issue
-/// one search per author (with limited concurrency) and de-dupe by source+id.
+/// EH has no OR across artists in one query, so we search per-author with
+/// limited concurrency and de-dupe by source+id.
 class ArtistBatchSearchPage extends StatefulWidget {
-  const ArtistBatchSearchPage({super.key, this.artists});
+  const ArtistBatchSearchPage({
+    super.key,
+    required this.artists,
+    required this.sources,
+  });
 
-  /// When null, reads current [SearchShortcutManager] author names.
-  final List<String>? artists;
+  final List<String> artists;
+  final List<ComicSource> sources;
 
   @override
   State<ArtistBatchSearchPage> createState() => _ArtistBatchSearchPageState();
 }
 
 class _ArtistBatchSearchPageState extends State<ArtistBatchSearchPage> {
-  late final List<String> _artists;
-  late final List<ComicSource> _sources;
-
-  @override
-  void initState() {
-    super.initState();
-    if (widget.artists != null && widget.artists!.isNotEmpty) {
-      _artists = widget.artists!
-          .map((e) => e.trim())
-          .where((e) => e.isNotEmpty)
-          .toList();
-    } else {
-      final names = <String>{};
-      for (final s in SearchShortcutManager.instance.all) {
-        if (s.isAuthor) names.add(s.value);
-      }
-      _artists = names.toList();
-    }
-
-    final all = ComicSource.all()
-        .where((e) => e.searchPageData != null)
-        .map((e) => e.key)
-        .toSet();
-    final settings = appdata.settings['searchSources'];
-    final keys = <String>[];
-    if (settings is List) {
-      for (final s in settings) {
-        if (s is String && all.contains(s)) keys.add(s);
-      }
-    }
-    if (keys.isEmpty) {
-      keys.addAll(all);
-    }
-    _sources = keys.map((k) => ComicSource.find(k)!).toList();
-  }
-
-  /// Load [page] for every author × every search source, merge unique comics.
   Future<Res<List<Comic>>> _loadPage(int page) async {
-    if (_artists.isEmpty) {
+    if (widget.artists.isEmpty) {
       return const Res([]);
     }
-    if (_sources.isEmpty) {
+    if (widget.sources.isEmpty) {
       return Res.error('No Search Sources'.tl);
     }
 
@@ -74,12 +41,11 @@ class _ArtistBatchSearchPageState extends State<ArtistBatchSearchPage> {
     final out = <Comic>[];
     final errors = <String>[];
 
-    // Cap parallel requests so we do not flood EH / proxy.
     const concurrency = 4;
     var index = 0;
     final tasks = <({ComicSource source, String artist})>[];
-    for (final artist in _artists) {
-      for (final source in _sources) {
+    for (final artist in widget.artists) {
+      for (final source in widget.sources) {
         tasks.add((source: source, artist: artist));
       }
     }
@@ -94,11 +60,10 @@ class _ArtistBatchSearchPageState extends State<ArtistBatchSearchPage> {
         final options =
             (data.searchOptions ?? []).map((e) => e.defaultValue).toList();
         try {
-          Res<List<Comic>> res;
+          late Res<List<Comic>> res;
           if (data.loadPage != null) {
             res = await data.loadPage!(t.artist, page, options);
           } else if (data.loadNext != null) {
-            // loadNext sources: only first page is meaningful for batch.
             if (page != 1) continue;
             res = await data.loadNext!(t.artist, null, options);
           } else {
@@ -112,9 +77,7 @@ class _ArtistBatchSearchPageState extends State<ArtistBatchSearchPage> {
           }
           for (final c in res.data ?? const <Comic>[]) {
             final key = '${c.sourceKey}\u0000${c.id}';
-            if (seen.add(key)) {
-              out.add(c);
-            }
+            if (seen.add(key)) out.add(c);
           }
         } catch (e) {
           errors.add('${t.source.name}: $e');
@@ -123,7 +86,6 @@ class _ArtistBatchSearchPageState extends State<ArtistBatchSearchPage> {
     }
 
     await Future.wait(List.generate(concurrency, (_) => worker()));
-
     if (out.isEmpty && errors.isNotEmpty) {
       return Res.error(errors.first);
     }
@@ -132,38 +94,47 @@ class _ArtistBatchSearchPageState extends State<ArtistBatchSearchPage> {
 
   @override
   Widget build(BuildContext context) {
-    final subtitle = _artists.isEmpty
-        ? 'No favorite artists yet'.tl
-        : '@n authors · @s sources'
-            .tl
-            .replaceAll('@n', '${_artists.length}')
-            .replaceAll('@s', '${_sources.length}');
+    final subtitle = '@n authors · @s sources'
+        .tl
+        .replaceAll('@n', '${widget.artists.length}')
+        .replaceAll('@s', '${widget.sources.length}');
 
+    // Use a normal Appbar + body. Do NOT pass SliverAppbar as ComicList
+    // leadingSliver: while loading, ComicList puts leading into a Column
+    // (expects RenderBox) and crashes with:
+    // _RenderSliverPinnedPersistentHeaderForWidgets is not a subtype of RenderBox.
     return Scaffold(
-      body: ComicList(
-        leadingSliver: SliverAppbar(
-          title: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text('Search all authors'.tl),
-              Text(
-                subtitle,
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ],
-          ),
+      appBar: Appbar(
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('Search all authors'.tl),
+            Text(subtitle, style: Theme.of(context).textTheme.bodySmall),
+          ],
         ),
-        loadPage: _artists.isEmpty ? null : _loadPage,
-        errorLeading: SliverAppbar(title: Text('Search all authors'.tl)),
+      ),
+      body: ComicList(
+        loadPage: _loadPage,
         scrollbarTopPadding: context.padding.top + 56,
       ),
     );
   }
 }
 
-/// Open batch search for all current favorited authors.
-void openArtistBatchSearch(BuildContext context) {
+List<ComicSource> _searchableSources() {
+  final all = ComicSource.all()
+      .where((e) => e.searchPageData != null)
+      .toList();
+  final settings = appdata.settings['searchSources'];
+  if (settings is! List || settings.isEmpty) return all;
+  final keys = settings.whereType<String>().toSet();
+  final filtered = all.where((s) => keys.contains(s.key)).toList();
+  return filtered.isEmpty ? all : filtered;
+}
+
+/// Show source checklist (none selected by default), then open batch search.
+Future<void> openArtistBatchSearch(BuildContext context) async {
   final names = <String>{};
   for (final s in SearchShortcutManager.instance.all) {
     if (s.isAuthor) names.add(s.value);
@@ -172,5 +143,81 @@ void openArtistBatchSearch(BuildContext context) {
     context.showMessage(message: 'No favorite artists yet'.tl);
     return;
   }
-  context.to(() => ArtistBatchSearchPage(artists: names.toList()));
+
+  final candidates = _searchableSources();
+  if (candidates.isEmpty) {
+    context.showMessage(message: 'No Search Sources'.tl);
+    return;
+  }
+
+  final selected = <String>{};
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) {
+      return StatefulBuilder(
+        builder: (ctx, setState) {
+          return ContentDialog(
+            title: 'Select sources'.tl,
+            content: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420, maxHeight: 420),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Pick sources to search. None are selected by default.'.tl,
+                      style: Theme.of(ctx).textTheme.bodySmall,
+                    ),
+                    const SizedBox(height: 8),
+                    for (final s in candidates)
+                      CheckboxListTile(
+                        dense: true,
+                        value: selected.contains(s.key),
+                        title: Text(s.name),
+                        controlAffinity: ListTileControlAffinity.leading,
+                        onChanged: (v) {
+                          setState(() {
+                            if (v == true) {
+                              selected.add(s.key);
+                            } else {
+                              selected.remove(s.key);
+                            }
+                          });
+                        },
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              Button.text(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: Text('Cancel'.tl),
+              ),
+              Button.filled(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: Text('Confirm'.tl),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
+
+  if (ok != true || !context.mounted) return;
+  if (selected.isEmpty) {
+    context.showMessage(message: 'Select at least one source'.tl);
+    return;
+  }
+
+  final sources =
+      candidates.where((s) => selected.contains(s.key)).toList(growable: false);
+  context.to(
+    () => ArtistBatchSearchPage(
+      artists: names.toList(),
+      sources: sources,
+    ),
+  );
 }

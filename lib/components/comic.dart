@@ -1103,10 +1103,9 @@ class ComicDescription extends StatelessWidget {
   Widget build(BuildContext context) {
     final descriptionParts = _descriptionParts();
     final source = _clean(badge) ?? _derivedSource(descriptionParts);
-    // Prefer explicit updateTime; else description when it looks like a date/time.
-    final update = _clean(updateText) ??
-        _updateTextFromTags() ??
-        _timeFromDescription(descriptionParts);
+    // Prefer explicit comic/source update time only — never favorite-added date
+    // that FavoriteItem packs into description as "YYYY-MM-DD | source".
+    final update = _clean(updateText) ?? _updateTextFromTags();
     final progress = _clean(progressText);
     final authorItems = _authorItems();
     final authors = authorItems.isEmpty
@@ -1119,14 +1118,12 @@ class ComicDescription extends StatelessWidget {
     final tagItems = _tagItems();
     final tagText = _tagText(tagItems);
     final status = _clean(statusText) ?? _statusText();
-    // Page count is omitted from this layout so tags have room.
     final fallbackDescription = _fallbackDescription(
       update,
       progress,
       source,
       descriptionParts,
     );
-    // List tiles (no tag taps) use a compact body + footer meta.
     final isDetail = onTapTag != null;
 
     final bodyRows = <Widget>[
@@ -1177,6 +1174,9 @@ class ComicDescription extends StatelessWidget {
         )
       else if (tagText != null)
         _tagsTextRow(context, tagText),
+      // Detail: same labeled row style as Author / Source.
+      if (update != null && isDetail)
+        _infoRow(context, "Update Time".tl, update, Colors.teal),
       if (status != null) _infoRow(context, "Status".tl, status, Colors.purple),
       if (progress != null)
         _infoRow(context, "Progress".tl, progress, Colors.green),
@@ -1184,7 +1184,9 @@ class ComicDescription extends StatelessWidget {
         _infoRow(context, "Description".tl, fallbackDescription, Colors.orange),
     ];
 
-    final footer = _metaFooter(context, update, languageLabel);
+    // List only: time bottom-left, language bottom-right, pinned to tile bottom.
+    final footer =
+        isDetail ? null : _metaFooter(context, update, languageLabel);
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -1196,34 +1198,44 @@ class ComicDescription extends StatelessWidget {
           extraRows: 0,
           reserveFooter: hasFooter,
         );
+        final body = <Widget>[
+          if (showTitle) ...[
+            Text(
+              title.trim(),
+              style: const TextStyle(
+                fontWeight: FontWeight.w500,
+                fontSize: 14,
+              ),
+              maxLines: bodyRows.isEmpty && !hasFooter ? maxLines : 1,
+              overflow: TextOverflow.ellipsis,
+              softWrap: true,
+            ),
+            const SizedBox(height: 4),
+          ],
+          if (rating != null) ...[
+            StarRating(value: rating!, size: 15),
+            const SizedBox(height: 2),
+          ],
+          if (bodyRows.isNotEmpty)
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: bodyRows.take(visibleRows).toList(),
+            ),
+        ];
+        if (!hasFooter) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.start,
+            children: body,
+          );
+        }
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisAlignment: MainAxisAlignment.start,
           children: [
-            if (showTitle) ...[
-              Text(
-                title.trim(),
-                style: const TextStyle(
-                  fontWeight: FontWeight.w500,
-                  fontSize: 14,
-                ),
-                maxLines: bodyRows.isEmpty && !hasFooter ? maxLines : 1,
-                overflow: TextOverflow.ellipsis,
-                softWrap: true,
-              ),
-              const SizedBox(height: 4),
-            ],
-            if (rating != null) ...[
-              StarRating(value: rating!, size: 15),
-              const SizedBox(height: 2),
-            ],
-            if (bodyRows.isNotEmpty)
-              Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: bodyRows.take(visibleRows).toList(),
-              ),
-            if (footer != null) footer,
+            ...body,
+            const Spacer(),
+            footer!,
           ],
         );
       },
@@ -1298,14 +1310,16 @@ class ComicDescription extends StatelessWidget {
       color: context.colorScheme.onSurfaceVariant,
     );
     return Padding(
-      padding: const EdgeInsets.only(top: 2),
+      padding: const EdgeInsets.only(top: 6),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           Expanded(
             child: Text(
               time ?? '',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.left,
               style: style,
             ),
           ),
@@ -1314,6 +1328,7 @@ class ComicDescription extends StatelessWidget {
               language,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.right,
               style: style,
             ),
         ],
