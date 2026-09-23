@@ -1118,13 +1118,18 @@ class ComicDescription extends StatelessWidget {
     final tagItems = _tagItems();
     final tagText = _tagText(tagItems);
     final status = _clean(statusText) ?? _statusText();
+    final isDetail = onTapTag != null;
+    // Pages: detail only (list omits them so tags keep room). Prefer the
+    // explicit [pagesText] from ComicDetails.maxPage; fall back to pages: tags.
+    final pages = isDetail
+        ? (_clean(pagesText) ?? _pagesText())
+        : null;
     final fallbackDescription = _fallbackDescription(
       update,
       progress,
       source,
       descriptionParts,
     );
-    final isDetail = onTapTag != null;
 
     final bodyRows = <Widget>[
       if (authors != null && onTapAuthor != null)
@@ -1177,6 +1182,8 @@ class ComicDescription extends StatelessWidget {
       // Detail: same labeled row style as Author / Source.
       if (update != null && isDetail)
         _infoRow(context, "Update Time".tl, update, Colors.teal),
+      if (pages != null)
+        _infoRow(context, "Pages".tl, pages, Colors.indigo),
       if (status != null) _infoRow(context, "Status".tl, status, Colors.purple),
       if (progress != null)
         _infoRow(context, "Progress".tl, progress, Colors.green),

@@ -68,16 +68,17 @@ AppLinkTarget? resolveAppLink(Uri uri, Iterable<AppLinkCandidate> candidates) {
   return null;
 }
 
-/// Navigator that currently hosts comic detail routes.
+/// Navigator that hosts [ComicPage] routes.
 ///
-/// Do NOT use [GlobalKey.currentContext] + [Navigator.of]: that context belongs
-/// to the [Navigator] element and [Navigator.of] walks to a *parent* navigator,
-/// so the new page is pushed under the current comic (only visible after pop).
+/// Comic tiles / details always push onto [App.mainNavigatorKey] (see
+/// [ComicTile._onTap]). Prefer that stack so a link opened from a comment
+/// sidebar is not pushed onto the Search tab's nested navigator (invisible
+/// under the current comic until it is popped).
+///
+/// Use [NavigatorState.push] via the key's [currentState] — never
+/// `Navigator.of(key.currentContext)`, which walks to a *parent* navigator
+/// and places the new route under the current comic.
 NavigatorState? _navigatorForAppLinks() {
-  if (App.secondaryNavigatorActive) {
-    final secondary = App.secondaryNavigatorKey?.currentState;
-    if (secondary != null) return secondary;
-  }
   return App.mainNavigatorKey?.currentState;
 }
 
@@ -90,33 +91,33 @@ Future<bool> handleAppLink(Uri uri) async {
   );
   if (target == null) return false;
 
-  // Dismiss comment sidebars / dialogs first.
+  // Dismiss comment sidebars / dialogs first (they live on the root navigator).
   App.closeRootOverlays();
 
-  // Push on the next frame so pops are applied before the new route.
-  final completer = Completer<bool>();
-  WidgetsBinding.instance.addPostFrameCallback((_) {
-    try {
-      final nav = _navigatorForAppLinks();
-      if (nav == null) {
-        completer.complete(false);
-        return;
-      }
-      nav.push(
-        AppPageRoute(
-          builder: (_) => ComicPage(
-            id: target.comicId,
-            sourceKey: target.sourceKey,
-          ),
+  // Wait until the overlay routes have actually been removed, then push.
+  // A single post-frame callback is not always enough after multiple pops
+  // (nested "more comments" sidebars), which caused multi-second delays or
+  // the new page staying buried under the current comic.
+  await WidgetsBinding.instance.endOfFrame;
+  await Future<void>.delayed(Duration.zero);
+  await WidgetsBinding.instance.endOfFrame;
+
+  try {
+    final nav = _navigatorForAppLinks();
+    if (nav == null) return false;
+    await nav.push(
+      AppPageRoute(
+        builder: (_) => ComicPage(
+          id: target.comicId,
+          sourceKey: target.sourceKey,
         ),
-      );
-      completer.complete(true);
-    } catch (e, s) {
-      Log.error('App Link', e, s);
-      completer.complete(false);
-    }
-  });
-  return completer.future;
+      ),
+    );
+    return true;
+  } catch (e, s) {
+    Log.error('App Link', e, s);
+    return false;
+  }
 }
 
 Future<void> _handleCapturedAppLink(Uri uri) async {

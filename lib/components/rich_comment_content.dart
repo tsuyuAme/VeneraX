@@ -143,11 +143,14 @@ class _Tag {
     if (resolved == null) return;
     final uri = Uri.tryParse(resolved);
     if (uri == null) return;
-    // Close comment sidebars first so the new page is not buried under them.
-    App.closeRootOverlays();
+    // handleAppLink closes root overlays (comment sidebars) and pushes onto
+    // the same navigator as normal comic tiles. Do not close overlays here
+    // as well — a double-pop can dismiss the comic page itself.
     if (await handleAppLink(uri)) {
       return;
     }
+    // External / unmatched URL: still dismiss sidebars before leaving the app.
+    App.closeRootOverlays();
     try {
       await launchUrlString(resolved);
     } catch (_) {}
