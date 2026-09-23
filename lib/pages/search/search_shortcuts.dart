@@ -165,6 +165,28 @@ class SearchShortcutManager extends ChangeNotifier {
   }
 
   /// Remove every author shortcut with the same display/raw name.
+  void updateAuthorName(String oldName, String newName) {
+    final n = newName.trim();
+    if (n.isEmpty) return;
+    final items = all.map((item) {
+      if (!item.isAuthor) return item.toJson();
+      if (item.value != oldName && item.searchValue != oldName) {
+        return item.toJson();
+      }
+      return SearchShortcut(
+        kind: item.kind,
+        sourceKey: item.sourceKey,
+        namespace: item.namespace,
+        value: n,
+        rawValue: item.rawValue ??
+            (item.value != n ? item.value : null),
+      ).toJson();
+    }).toList();
+    appdata.settings['searchShortcuts'] = items;
+    unawaited(appdata.saveData());
+    notifyListeners();
+  }
+
   void removeAuthorByName(String name) {
     final items = all.where((item) {
       if (!item.isAuthor) return true;

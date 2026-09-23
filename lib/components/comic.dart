@@ -1070,6 +1070,7 @@ class ComicDescription extends StatelessWidget {
     this.showTitle = true,
     this.onTapAuthor,
     this.onTapTag,
+    this.onAuthorOrTagMenu,
     this.enableLongPressCopy = false,
   });
 
@@ -1088,6 +1089,10 @@ class ComicDescription extends StatelessWidget {
   final bool showTitle;
   final void Function(String author, String? namespace)? onTapAuthor;
   final void Function(String tag, String namespace)? onTapTag;
+
+  /// Long-press / right-click for author or tag (favorite, copy, …).
+  final void Function(String value, String? namespace, BuildContext ctx)?
+      onAuthorOrTagMenu;
 
   /// Whether long-pressing an info/tag value copies it to the clipboard.
   /// Enabled on the comic detail page; disabled on list tiles so a long press
@@ -1134,6 +1139,13 @@ class ComicDescription extends StatelessWidget {
                 (item) => _InfoAction(
                   text: item.label,
                   onTap: () => onTapAuthor!(item.value, item.namespace),
+                  onMenu: onAuthorOrTagMenu == null
+                      ? null
+                      : (ctx) => onAuthorOrTagMenu!(
+                            item.value,
+                            item.namespace,
+                            ctx,
+                          ),
                 ),
               )
               .toList(),
@@ -1151,11 +1163,17 @@ class ComicDescription extends StatelessWidget {
                 (item) => _InfoAction(
                   text: item.label,
                   onTap: () => onTapTag!(item.value, item.namespace ?? ''),
+                  onMenu: onAuthorOrTagMenu == null
+                      ? null
+                      : (ctx) => onAuthorOrTagMenu!(
+                            item.value,
+                            item.namespace,
+                            ctx,
+                          ),
                 ),
               )
               .toList(),
           Colors.pinkAccent,
-          maxLines: 2,
         )
       else if (tagText != null)
         _tagsTextRow(context, tagText),
@@ -1419,25 +1437,35 @@ class ComicDescription extends StatelessWidget {
           ),
           const SizedBox(width: 6),
           Expanded(
-            child: maxLines == null
-                ? Wrap(
+            child: Wrap(
                     spacing: 0,
                     runSpacing: 2,
                     children: [
                       for (var i = 0; i < actions.length; i++) ...[
-                        InkWell(
-                          borderRadius: BorderRadius.circular(4),
-                          onTap: actions[i].onTap,
-                          onLongPress: enableLongPressCopy
-                              ? () => _copy(context, actions[i].text)
-                              : null,
-                          child: Text(
-                            actions[i].text,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: context.colorScheme.primary,
-                            ),
-                          ).paddingHorizontal(2),
+                        Builder(
+                          builder: (chipCtx) {
+                            return InkWell(
+                              borderRadius: BorderRadius.circular(4),
+                              onTap: actions[i].onTap,
+                              onLongPress: () {
+                                if (actions[i].onMenu != null) {
+                                  actions[i].onMenu!(chipCtx);
+                                } else if (enableLongPressCopy) {
+                                  _copy(context, actions[i].text);
+                                }
+                              },
+                              onSecondaryTap: actions[i].onMenu == null
+                                  ? null
+                                  : () => actions[i].onMenu!(chipCtx),
+                              child: Text(
+                                actions[i].text,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: context.colorScheme.primary,
+                                ),
+                              ).paddingHorizontal(2),
+                            );
+                          },
                         ),
                         if (i != actions.length - 1)
                           Text(
@@ -1450,16 +1478,6 @@ class ComicDescription extends StatelessWidget {
                       ],
                     ],
                   )
-                : Text(
-                    actions.map((e) => e.text).join(" / "),
-                    maxLines: maxLines,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 12,
-                      height: 1.25,
-                      color: context.colorScheme.primary,
-                    ),
-                  ),
           ),
         ],
       ),
@@ -1771,10 +1789,15 @@ class _DescriptionTag {
 }
 
 class _InfoAction {
-  const _InfoAction({required this.text, required this.onTap});
+  const _InfoAction({
+    required this.text,
+    required this.onTap,
+    this.onMenu,
+  });
 
   final String text;
   final VoidCallback onTap;
+  final void Function(BuildContext ctx)? onMenu;
 }
 
 class _ReadingHistoryPainter extends CustomPainter {

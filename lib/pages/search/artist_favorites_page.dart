@@ -64,6 +64,51 @@ class _ArtistFavoritesPageState extends State<ArtistFavoritesPage> {
     context.showMessage(message: 'Copied'.tl);
   }
 
+  Future<void> _edit(String name) async {
+    // Reuse favorite dialog with a synthetic draft for rename.
+    final matches = SearchShortcutManager.instance.all
+        .where((s) => s.isAuthor && (s.value == name || s.searchValue == name))
+        .toList();
+    if (matches.isEmpty) return;
+    final draft = matches.first;
+    final controller = TextEditingController(text: name);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return ContentDialog(
+          title: 'Edit'.tl,
+          content: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: TextField(
+              controller: controller,
+              decoration: InputDecoration(
+                labelText: 'Author name'.tl,
+                border: const OutlineInputBorder(),
+              ),
+              autofocus: true,
+              onSubmitted: (_) => Navigator.of(ctx).pop(true),
+            ),
+          ),
+          actions: [
+            Button.text(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: Text('Cancel'.tl),
+            ),
+            Button.filled(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: Text('Confirm'.tl),
+            ),
+          ],
+        );
+      },
+    );
+    final newName = controller.text.trim();
+    controller.dispose();
+    if (ok == true && newName.isNotEmpty && newName != name) {
+      SearchShortcutManager.instance.updateAuthorName(name, newName);
+    }
+  }
+
   void _remove(String name) {
     showConfirmDialog(
       context: context,
@@ -114,19 +159,31 @@ class _ArtistFavoritesPageState extends State<ArtistFavoritesPage> {
                   final entry = list[index];
                   final name = entry.key;
                   final sources = entry.value.join(', ');
-                  return GestureDetector(
-                    onSecondaryTap: () => _remove(name),
-                    child: ListTile(
-                      title: Text(name),
-                      subtitle: Text(sources),
-                      trailing: IconButton(
-                        tooltip: 'Copy'.tl,
-                        icon: const Icon(Icons.copy, size: 20),
-                        onPressed: () => _copy(name),
-                      ),
-                      onTap: () => _openSearch(name),
-                      onLongPress: () => _remove(name),
+                  return ListTile(
+                    title: Text(name),
+                    subtitle: Text(sources),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          tooltip: 'Edit'.tl,
+                          icon: const Icon(Icons.edit_outlined, size: 20),
+                          onPressed: () => _edit(name),
+                        ),
+                        IconButton(
+                          tooltip: 'Delete'.tl,
+                          icon: const Icon(Icons.delete_outline, size: 20),
+                          onPressed: () => _remove(name),
+                        ),
+                        IconButton(
+                          tooltip: 'Copy'.tl,
+                          icon: const Icon(Icons.copy, size: 20),
+                          onPressed: () => _copy(name),
+                        ),
+                      ],
                     ),
+                    onTap: () => _openSearch(name),
+                    onLongPress: () => _edit(name),
                   );
                 },
                 childCount: list.length,

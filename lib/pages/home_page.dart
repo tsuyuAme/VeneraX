@@ -649,30 +649,38 @@ class _ArtistFavorites extends StatelessWidget {
   Widget build(BuildContext context) {
     return SliverToBoxAdapter(
       child: _HomeSectionSurface(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 10, 8, 4),
-              child: Row(
-                children: [
-                  _homeSectionIcon(context, Icons.person_outline),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _HomeSectionTitle(title: 'Favorite authors'.tl),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: () {
+              context.to(() => const ArtistFavoritesPage());
+            },
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 10, 8, 4),
+                  child: Row(
+                    children: [
+                      _homeSectionIcon(context, Icons.person_outline),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _HomeSectionTitle(title: 'Favorite authors'.tl),
+                      ),
+                      Icon(
+                        Icons.chevron_right,
+                        color: context.colorScheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: 8),
+                    ],
                   ),
-                  IconButton(
-                    tooltip: 'View more'.tl,
-                    icon: const Icon(Icons.chevron_right),
-                    onPressed: () {
-                      context.to(() => const ArtistFavoritesPage());
-                    },
-                  ),
-                ],
-              ),
+                ),
+                // Chips handle their own taps; absorb so parent InkWell
+                // does not steal chip presses incorrectly on some platforms.
+                const ArtistFavoritesHomeSection(),
+              ],
             ),
-            const ArtistFavoritesHomeSection(),
-          ],
+          ),
         ),
       ),
     );

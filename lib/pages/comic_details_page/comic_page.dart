@@ -990,6 +990,9 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
             onTapTag(author, namespace ?? 'author');
           },
           onTapTag: onTapTag,
+          onAuthorOrTagMenu: (value, namespace, ctx) {
+            onLongPressTag(value, namespace ?? 'author', ctx);
+          },
           enableLongPressCopy: true,
         ),
       ],
