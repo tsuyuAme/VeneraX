@@ -808,6 +808,46 @@ class ComicStateRepository {
     }
     return null;
   }
+
+  /// Parse common comic date strings; returns null if not a date.
+  static DateTime? _tryParseComicDate(String? raw) {
+    if (raw == null) return null;
+    final s = raw.trim();
+    if (s.isEmpty) return null;
+    final m = RegExp(r'^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})').firstMatch(s);
+    if (m != null) {
+      final y = int.tryParse(m.group(1)!);
+      final mo = int.tryParse(m.group(2)!);
+      final d = int.tryParse(m.group(3)!);
+      if (y != null && mo != null && d != null) {
+        try {
+          return DateTime(y, mo, d);
+        } catch (_) {}
+      }
+    }
+    return DateTime.tryParse(s);
+  }
+
+  /// Among candidates, keep the string whose parsed date is newest.
+  String? _pickNewestDate(List<String?> candidates) {
+    DateTime? best;
+    String? bestStr;
+    for (final c in candidates) {
+      if (c == null) continue;
+      final trimmed = c.trim();
+      if (trimmed.isEmpty) continue;
+      final dt = _tryParseComicDate(trimmed);
+      if (dt == null) {
+        bestStr ??= trimmed;
+        continue;
+      }
+      if (best == null || dt.isAfter(best)) {
+        best = dt;
+        bestStr = trimmed;
+      }
+    }
+    return bestStr;
+  }
 }
 
 class _ComicMetadata {
