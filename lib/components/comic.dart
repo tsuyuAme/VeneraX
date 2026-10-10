@@ -3205,7 +3205,7 @@ class SimpleComicTile extends StatelessWidget {
 
   final bool withTitle;
 
-  final int? heroID;
+  final Object? heroID;
 
   final bool showFavorite;
 
