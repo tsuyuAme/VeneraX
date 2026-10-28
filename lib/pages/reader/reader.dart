@@ -1264,7 +1264,6 @@ abstract mixin class _ReaderLocation {
 /// `readerKeepScreenOn` setting.
 abstract mixin class _AutoPageTurner {
   String get cid;
-  }
 
   Timer? autoPageTurningTimer;
 
