@@ -2713,7 +2713,9 @@ class _LoginPageState extends State<_LoginPage> {
                 if (widget.config.loginWebsite != null)
                   TextButton(
                     onPressed: () {
-                      if (App.isLinux) {
+                      // Windows: in-app webview hits UnimplementedError on
+                      // WebViewFeature; use DesktopWebview (same as Linux).
+                      if (App.isLinux || App.isWindows) {
                         loginWithWebview2();
                       } else {
                         loginWithWebview();

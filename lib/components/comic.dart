@@ -693,9 +693,7 @@ class ComicTile extends StatelessWidget {
                         updateText: displayInfo.updateTime,
                         statusText: displayInfo.status,
                         progressText: chapterProgress.currentTitle,
-                        pagesText: _showPageCount
-                            ? displayInfo.pagesText
-                            : null,
+                        pagesText: null,
                       ),
                     ),
                   ],
@@ -787,20 +785,6 @@ class ComicTile extends StatelessWidget {
                         if (lines.length > 3) {
                           lines = lines.sublist(0, 3);
                         }
-                        final pageCount = _showPageCount
-                            ? const ComicStateRepository().quickPageCountFor(
-                                comic,
-                              )
-                            : null;
-                        // Prepended after the description was already trimmed to
-                        // its 3 lines, so the count adds a line instead of
-                        // costing one. Sources that already spell the count into
-                        // the description would otherwise say it twice.
-                        if (pageCount != null &&
-                            !lines.any((e) => e.containsNumber(pageCount))) {
-                          lines.insert(0, '${pageCount}P');
-                        }
-
                         if (lines.isEmpty) {
                           return const SizedBox();
                         }
@@ -1087,6 +1071,7 @@ class ComicDescription extends StatelessWidget {
     this.showDescription = true,
     this.onTapAuthor,
     this.onTapTag,
+    this.onAuthorOrTagMenu,
     this.enableLongPressCopy = false,
   });
 
@@ -1109,6 +1094,10 @@ class ComicDescription extends StatelessWidget {
   final void Function(String author, String? namespace)? onTapAuthor;
   final void Function(String tag, String namespace)? onTapTag;
 
+  /// Long-press / right-click for author or tag (favorite, copy, …).
+  final void Function(String value, String? namespace, BuildContext ctx)?
+      onAuthorOrTagMenu;
+
   /// Whether long-pressing an info/tag value copies it to the clipboard.
   /// Enabled on the comic detail page; disabled on list tiles so a long press
   /// over the tag area triggers the tile's own context menu instead (issue #79).
@@ -1118,6 +1107,8 @@ class ComicDescription extends StatelessWidget {
   Widget build(BuildContext context) {
     final descriptionParts = _descriptionParts();
     final source = _clean(badge) ?? _derivedSource(descriptionParts);
+    // Prefer explicit comic/source update time only — never favorite-added date
+    // that FavoriteItem packs into description as "YYYY-MM-DD | source".
     final update = _clean(updateText) ?? _updateTextFromTags();
     final progress = _clean(progressText);
     final authorItems = _authorItems();
@@ -1125,17 +1116,26 @@ class ComicDescription extends StatelessWidget {
         ? null
         : authorItems.map((e) => e.label).join(", ");
     final languageItems = _languageItems();
+    final languageLabel = languageItems.isEmpty
+        ? null
+        : _tagText(languageItems);
     final tagItems = _tagItems();
     final tagText = _tagText(tagItems);
     final status = _clean(statusText) ?? _statusText();
-    final pages = _clean(pagesText) ?? _pagesText();
+    final isDetail = onTapTag != null;
+    // Pages: detail only (list omits them so tags keep room). Prefer the
+    // explicit [pagesText] from ComicDetails.maxPage; fall back to pages: tags.
+    final pages = isDetail
+        ? (_clean(pagesText) ?? _pagesText())
+        : null;
     final fallbackDescription = _fallbackDescription(
       update,
       progress,
       source,
       descriptionParts,
     );
-    final rows = <Widget>[
+
+    final bodyRows = <Widget>[
       if (authors != null && onTapAuthor != null)
         _actionRow(
           context,
@@ -1145,6 +1145,13 @@ class ComicDescription extends StatelessWidget {
                 (item) => _InfoAction(
                   text: item.label,
                   onTap: () => onTapAuthor!(item.value, item.namespace),
+                  onMenu: onAuthorOrTagMenu == null
+                      ? null
+                      : (ctx) => onAuthorOrTagMenu!(
+                            item.value,
+                            item.namespace,
+                            ctx,
+                          ),
                 ),
               )
               .toList(),
@@ -1152,35 +1159,8 @@ class ComicDescription extends StatelessWidget {
         )
       else if (authors != null)
         _infoRow(context, "Authors".tl, authors, Colors.lightBlue),
-      // Ahead of update/source/tags on purpose: only the first few rows survive
-      // the height budget below, and page count is what a reader filters on.
-      if (pages != null) _infoRow(context, "Pages".tl, pages, Colors.teal),
-      // High in the list for the same reason: a fixed-height tile draws only
-      // its first few rows, and language is worth a slot there (issue #288).
-      if (languageItems.isNotEmpty && onTapTag != null)
-        _actionRow(
-          context,
-          "Language".tl,
-          languageItems
-              .map(
-                (item) => _InfoAction(
-                  text: item.label,
-                  onTap: () => onTapTag!(item.value, item.namespace ?? ''),
-                ),
-              )
-              .toList(),
-          Colors.indigo,
-        )
-      else if (languageItems.isNotEmpty)
-        _infoRow(
-          context,
-          "Language".tl,
-          _tagText(languageItems)!,
-          Colors.indigo,
-        ),
-      if (update != null) _infoRow(context, "Update".tl, update, Colors.cyan),
       if (source != null) _infoRow(context, "Source".tl, source, Colors.cyan),
-      if (tagItems.isNotEmpty && onTapTag != null)
+      if (tagItems.isNotEmpty && isDetail)
         _actionRow(
           context,
           "Tags".tl,
@@ -1189,80 +1169,205 @@ class ComicDescription extends StatelessWidget {
                 (item) => _InfoAction(
                   text: item.label,
                   onTap: () => onTapTag!(item.value, item.namespace ?? ''),
+                  onMenu: onAuthorOrTagMenu == null
+                      ? null
+                      : (ctx) => onAuthorOrTagMenu!(
+                            item.value,
+                            item.namespace,
+                            ctx,
+                          ),
                 ),
               )
               .toList(),
           Colors.pinkAccent,
         )
       else if (tagText != null)
-        _infoRow(context, "Tags".tl, tagText, Colors.pinkAccent),
+        _tagsTextRow(context, tagText),
+      // Detail: same labeled row style as Author / Source.
+      if (update != null && isDetail)
+        _infoRow(context, "Update Time".tl, update, Colors.teal),
+      if (pages != null)
+        _infoRow(context, "Pages".tl, pages, Colors.indigo),
       if (status != null) _infoRow(context, "Status".tl, status, Colors.purple),
       if (progress != null)
         _infoRow(context, "Progress".tl, progress, Colors.green),
-      if (showDescription && fallbackDescription != null)
+      if (isDetail && fallbackDescription != null)
         _infoRow(context, "Description".tl, fallbackDescription, Colors.orange),
     ];
 
+    // List only: time bottom-left, language bottom-right, pinned to tile bottom.
+    final footer =
+        isDetail ? null : _metaFooter(context, update, languageLabel);
+
     return LayoutBuilder(
       builder: (context, constraints) {
+        final hasFooter = footer != null;
         final visibleRows = _visibleRowCount(
           constraints.maxHeight,
           rating != null,
-          totalRows: rows.length,
-          extraRows: languageItems.isEmpty ? 0 : 1,
+          totalRows: bodyRows.length,
+          extraRows: 0,
+          reserveFooter: hasFooter,
         );
-        return Column(
+        final body = <Widget>[
+          if (showTitle) ...[
+            Text(
+              title.trim(),
+              style: const TextStyle(
+                fontWeight: FontWeight.w500,
+                fontSize: 14,
+              ),
+              maxLines: bodyRows.isEmpty && !hasFooter ? maxLines : 1,
+              overflow: TextOverflow.ellipsis,
+              softWrap: true,
+            ),
+            const SizedBox(height: 4),
+          ],
+          if (rating != null) ...[
+            StarRating(value: rating!, size: 15),
+            const SizedBox(height: 2),
+          ],
+          if (bodyRows.isNotEmpty)
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: bodyRows.take(visibleRows).toList(),
+            ),
+        ];
+        if (!hasFooter) {
+          return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisAlignment: MainAxisAlignment.start,
+            children: body,
+          );
+        }
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (showTitle) ...[
-              Text(
-                title.trim(),
-                style: const TextStyle(
-                  fontWeight: FontWeight.w500,
-                  fontSize: 14,
-                ),
-                maxLines: rows.isEmpty ? maxLines : 1,
-                overflow: TextOverflow.ellipsis,
-                softWrap: true,
-              ),
-              const SizedBox(height: 4),
-            ],
-            if (rating != null) ...[
-              StarRating(value: rating!, size: 15),
-              const SizedBox(height: 2),
-            ],
-            if (rows.isNotEmpty)
-              Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: rows.take(visibleRows).toList(),
-              ),
+            ...body,
+            const Spacer(),
+            footer!,
           ],
         );
       },
     );
   }
 
-  /// Rows the tile can draw. [extraRows] widens the cap for rows added after
-  /// these numbers were tuned, so the language row costs no existing one
-  /// (issue #288).
+  /// Upload/update time from plain description parts (EH puts time there).
+  String? _timeFromDescription(List<String> parts) {
+    for (final part in parts) {
+      if (_looksLikeDate(part)) {
+        return _clean(part);
+      }
+    }
+    return null;
+  }
+
+  /// Tags as text: at most two lines, then ellipsis.
+  Widget _tagsTextRow(BuildContext context, String text) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            height: 18,
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            decoration: BoxDecoration(
+              color: Colors.pinkAccent.toOpacity(0.18),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Center(
+              child: Text(
+                "Tags".tl,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: context.colorScheme.onSurface,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              text,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.25,
+                color: context.colorScheme.onSurface,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Compact footer: time on the left, language on the right.
+  Widget? _metaFooter(
+    BuildContext context,
+    String? time,
+    String? language,
+  ) {
+    if (time == null && language == null) {
+      return null;
+    }
+    final style = TextStyle(
+      fontSize: 10,
+      height: 1.2,
+      color: context.colorScheme.onSurfaceVariant,
+    );
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          Expanded(
+            child: Text(
+              time ?? '',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.left,
+              style: style,
+            ),
+          ),
+          if (language != null)
+            Text(
+              language,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.right,
+              style: style,
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// Rows the tile can draw.
   ///
   /// An unbounded height means the host scrolls (the detail page) rather than
   /// clipping, so every row is drawn there; only a fixed-height tile has to
-  /// choose.
+  /// choose. [reserveFooter] keeps space for the time/language footer.
   int _visibleRowCount(
     double maxHeight,
     bool hasRating, {
     required int totalRows,
     int extraRows = 0,
+    bool reserveFooter = false,
   }) {
     if (maxHeight.isInfinite) {
       return totalRows;
     }
-    final reservedHeight = (showTitle ? 24 : 0) + (hasRating ? 20 : 0);
+    final reservedHeight = (showTitle ? 24 : 0) +
+        (hasRating ? 20 : 0) +
+        (reserveFooter ? 14 : 0);
     final count = ((maxHeight - reservedHeight) / 21).floor();
-    return math.max(1, math.min(5 + extraRows, count));
+    // Prefer showing tags: allow up to 6 body rows when height permits.
+    return math.max(1, math.min(6 + extraRows, count));
   }
 
   void _copy(BuildContext context, String text) {
@@ -1330,8 +1435,9 @@ class ComicDescription extends StatelessWidget {
     BuildContext context,
     String label,
     List<_InfoAction> actions,
-    Color color,
-  ) {
+    Color color, {
+    int? maxLines,
+  }) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 3),
       child: Row(
@@ -1358,35 +1464,46 @@ class ComicDescription extends StatelessWidget {
           const SizedBox(width: 6),
           Expanded(
             child: Wrap(
-              spacing: 0,
-              runSpacing: 2,
-              children: [
-                for (var i = 0; i < actions.length; i++) ...[
-                  InkWell(
-                    borderRadius: BorderRadius.circular(4),
-                    onTap: actions[i].onTap,
-                    onLongPress: enableLongPressCopy
-                        ? () => _copy(context, actions[i].text)
-                        : null,
-                    child: Text(
-                      actions[i].text,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: context.colorScheme.primary,
-                      ),
-                    ).paddingHorizontal(2),
-                  ),
-                  if (i != actions.length - 1)
-                    Text(
-                      " / ",
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: context.colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                ],
-              ],
-            ),
+                    spacing: 0,
+                    runSpacing: 2,
+                    children: [
+                      for (var i = 0; i < actions.length; i++) ...[
+                        Builder(
+                          builder: (chipCtx) {
+                            return InkWell(
+                              borderRadius: BorderRadius.circular(4),
+                              onTap: actions[i].onTap,
+                              onLongPress: () {
+                                if (actions[i].onMenu != null) {
+                                  actions[i].onMenu!(chipCtx);
+                                } else if (enableLongPressCopy) {
+                                  _copy(context, actions[i].text);
+                                }
+                              },
+                              onSecondaryTap: actions[i].onMenu == null
+                                  ? null
+                                  : () => actions[i].onMenu!(chipCtx),
+                              child: Text(
+                                actions[i].text,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: context.colorScheme.primary,
+                                ),
+                              ).paddingHorizontal(2),
+                            );
+                          },
+                        ),
+                        if (i != actions.length - 1)
+                          Text(
+                            " / ",
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: context.colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                      ],
+                    ],
+                  )
           ),
         ],
       ),
@@ -1698,10 +1815,15 @@ class _DescriptionTag {
 }
 
 class _InfoAction {
-  const _InfoAction({required this.text, required this.onTap});
+  const _InfoAction({
+    required this.text,
+    required this.onTap,
+    this.onMenu,
+  });
 
   final String text;
   final VoidCallback onTap;
+  final void Function(BuildContext ctx)? onMenu;
 }
 
 class _ReadingHistoryPainter extends CustomPainter {

@@ -103,8 +103,8 @@ class _Tag {
     }
     var recognizer = s.recognizer;
     if (name == 'a') {
-      var link = attributes['href'];
-      if (link != null && link.isURL) {
+      final link = resolveHref(attributes['href']);
+      if (link != null) {
         recognizer = TapGestureRecognizer()
           ..onTap = () {
             handleLink(link);
@@ -114,14 +114,46 @@ class _Tag {
     return TextSpan(text: s.text, style: style, recognizer: recognizer);
   }
 
-  static void handleLink(String link) async {
-    if (link.isURL) {
-      if (await handleAppLink(Uri.parse(link))) {
-        Navigator.of(App.rootContext).maybePop();
-      } else {
-        launchUrlString(link);
-      }
+  /// EH-style relative / protocol-relative hrefs → absolute https URLs.
+  static String? resolveHref(String? href) {
+    if (href == null) return null;
+    var link = href.trim();
+    if (link.isEmpty ||
+        link.startsWith('#') ||
+        link.toLowerCase().startsWith('javascript:')) {
+      return null;
     }
+    if (link.startsWith('//')) {
+      link = 'https:$link';
+    } else if (link.startsWith('/')) {
+      link = 'https://exhentai.org$link';
+    }
+    if (link.isURL) return link;
+    if (RegExp(
+      r'^https?://(e-|ex)hentai\.org/',
+      caseSensitive: false,
+    ).hasMatch(link)) {
+      return link;
+    }
+    return null;
+  }
+
+  static void handleLink(String link) async {
+    final resolved = resolveHref(link) ?? (link.isURL ? link : null);
+    if (resolved == null) return;
+    final uri = Uri.tryParse(resolved);
+    if (uri == null) return;
+    // handleAppLink closes root overlays (comment sidebars) and pushes onto
+    // the same navigator as normal comic tiles. Do not close overlays here
+    // as well — a double-pop can dismiss the comic page itself.
+    if (await handleAppLink(uri)) {
+      return;
+    }
+    // External / unmatched URL: still dismiss sidebars before leaving the app.
+    App.closeRootOverlays();
+    try {
+      await launchUrlString(resolved);
+    } catch (_) {}
   }
 }
 
@@ -138,6 +170,7 @@ class RichCommentContent extends StatefulWidget {
     required this.text,
     this.showImages = true,
     this.fontSize,
+    this.selectable = true,
   });
 
   final String text;
@@ -147,6 +180,9 @@ class RichCommentContent extends StatefulWidget {
   /// Explicit font size for the comment body. When null, inherits the ambient
   /// [DefaultTextStyle] (used by compact previews that must not scale).
   final double? fontSize;
+
+  /// Prefer false inside horizontal lists so link taps are not stolen.
+  final bool selectable;
 
   @override
   State<RichCommentContent> createState() => _RichCommentContentState();
@@ -301,9 +337,10 @@ class _RichCommentContentState extends State<RichCommentContent> {
     if (widget.fontSize != null) {
       baseStyle = baseStyle.copyWith(fontSize: widget.fontSize);
     }
-    Widget content = SelectableText.rich(
-      TextSpan(style: baseStyle, children: textSpan),
-    );
+    final span = TextSpan(style: baseStyle, children: textSpan);
+    Widget content = widget.selectable
+        ? SelectableText.rich(span)
+        : Text.rich(span);
     if (images.isNotEmpty && widget.showImages) {
       content = Column(
         mainAxisSize: MainAxisSize.min,
@@ -313,25 +350,37 @@ class _RichCommentContentState extends State<RichCommentContent> {
             runSpacing: 4,
             spacing: 4,
             children: images.map((e) {
+              final size = widget.selectable ? 100.0 : 72.0;
               Widget image = Container(
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(8),
                   color: Theme.of(context).colorScheme.surfaceContainerLow,
                 ),
-                width: 100,
-                height: 100,
+                width: size,
+                height: size,
+                clipBehavior: Clip.antiAlias,
                 child: Image(
-                  width: 100,
-                  height: 100,
+                  width: size,
+                  height: size,
+                  fit: BoxFit.cover,
                   image: CachedImageProvider(e.url),
                 ),
               );
-              if (e.link != null) {
-                image = InkWell(
-                  onTap: () {
-                    _Tag.handleLink(e.link!);
-                  },
-                  child: image,
+              // Prefer explicit <a href>, else try opening the image URL itself
+              // when it is a gallery/cover host page (rare).
+              final tapLink = e.link ??
+                  (e.url.isURL && e.url.contains('hentai.org/g/')
+                      ? e.url
+                      : null);
+              if (tapLink != null) {
+                image = Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: () {
+                      _Tag.handleLink(tapLink);
+                    },
+                    child: image,
+                  ),
                 );
               }
               return image;
