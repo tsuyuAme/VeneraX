@@ -126,6 +126,7 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
     // top bar lives in an OverlayEntry that a parent setState won't rebuild.
     ImageTranslationService.instance.addListener(_onTranslationStatusChanged);
     Future.delayed(const Duration(milliseconds: 200), addDragListener);
+    context.reader._scaffoldState = this;
   }
 
   void _onTranslationStatusChanged() {
@@ -153,6 +154,7 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
     setState(() {
       _isOpen = !_isOpen;
     });
+    context.reader._onMenuToggled(_isOpen);
   }
 
   /// Reader-only orientation lock: null follows the device, false locks
@@ -268,6 +270,17 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
             child: RepaintBoundary(child: buildBottom()),
           ),
         ),
+        // Topmost: an e-ink refresh must cover the bars and page info as well.
+        Positioned.fill(
+          child: IgnorePointer(
+            child: ValueListenableBuilder<Color?>(
+              valueListenable: context.reader._einkRefresher.overlay,
+              builder: (context, color, _) => color == null
+                  ? const SizedBox.shrink()
+                  : ColoredBox(color: color),
+            ),
+          ),
+        ),
       ],
     );
   }
@@ -349,26 +362,28 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
     );
   }
 
-  /// Cache key of the currently visible page's translated variant plus the
+  /// Cache keys of the translated variants of the images on screen plus the
   /// comic's own render mode, or null when translation is not enabled for this
-  /// comic or the page can't be resolved. The mode travels with the key because
+  /// comic or no image is on screen. The mode travels with the keys because
   /// the status/error markers are per rendered image, and the mode is a
   /// per-comic setting.
-  ({String cacheKey, InpaintMode mode})? _currentTranslationTarget() {
+  ({List<String> cacheKeys, InpaintMode mode})? _currentTranslationTargets() {
     final reader = context.reader;
     if (!ImageTranslationService.enabledFor(reader.cid, reader.type.sourceKey)) {
       return null;
     }
-    final images = reader.images;
-    if (images == null || images.isEmpty) return null;
-    var index = (reader.page - 1).clamp(0, images.length - 1);
+    final (start, end) = reader.pageImageRange;
+    if (start >= end) return null;
     return (
-      cacheKey: ImageTranslationService.cacheKeyFor(
-        reader.type.comicSource?.key,
-        reader.cid,
-        reader.eid,
-        index + 1,
-      ),
+      cacheKeys: [
+        for (var i = start; i < end; i++)
+          ImageTranslationService.cacheKeyFor(
+            reader.type.comicSource?.key,
+            reader.cid,
+            reader.eid,
+            i + 1,
+          ),
+      ],
       mode: TranslationConfig.of(reader.cid, reader.type.sourceKey).mode,
     );
   }
@@ -382,7 +397,7 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
       return const [];
     }
     final service = ImageTranslationService.instance;
-    final target = _currentTranslationTarget();
+    final targets = _currentTranslationTargets();
     final widgets = <Widget>[];
 
     // Show-original toggle: lets the reader compare against the source art
@@ -403,50 +418,57 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
       ),
     );
 
-    if (target != null && !reader.showOriginalPages) {
-      switch (service.statusOf(target.cacheKey, target.mode)) {
-        case PageTranslationStatus.translating:
-          widgets.add(
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 12),
-              child: SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(strokeWidth: 2),
+    if (targets != null && !reader.showOriginalPages) {
+      PageTranslationStatus statusOf(String key) =>
+          service.statusOf(key, targets.mode);
+      final failed = [
+        for (final key in targets.cacheKeys)
+          if (statusOf(key) == PageTranslationStatus.failed) key,
+      ];
+      // With several images on screen, a failure, which wants a tap, is shown
+      // before work still running on another.
+      if (failed.isNotEmpty) {
+        widgets.add(
+          Tooltip(
+            message:
+                service.errorOf(failed.first, targets.mode) ??
+                "Translation failed".tl,
+            child: IconButton(
+              icon: Icon(
+                Icons.error_outline,
+                color: context.colorScheme.error,
               ),
+              onPressed: () => _retryTranslation(failed, targets.mode),
             ),
-          );
-        case PageTranslationStatus.failed:
-          widgets.add(
-            Tooltip(
-              message:
-                  service.errorOf(target.cacheKey, target.mode) ??
-                  "Translation failed".tl,
-              child: IconButton(
-                icon: Icon(
-                  Icons.error_outline,
-                  color: context.colorScheme.error,
-                ),
-                onPressed: () =>
-                    _retryTranslation(target.cacheKey, target.mode),
-              ),
+          ),
+        );
+      } else if (targets.cacheKeys.any(
+        (key) => statusOf(key) == PageTranslationStatus.translating,
+      )) {
+        widgets.add(
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 12),
+            child: SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
             ),
-          );
-        case PageTranslationStatus.translated:
-        case PageTranslationStatus.noContent:
-        case PageTranslationStatus.idle:
-          break;
+          ),
+        );
       }
     }
     return widgets;
   }
 
-  void _retryTranslation(String cacheKey, InpaintMode mode) {
+  void _retryTranslation(List<String> cacheKeys, InpaintMode mode) {
     final service = ImageTranslationService.instance;
-    var error = service.errorOf(cacheKey, mode);
-    service.clearFailure(cacheKey, mode);
-    // Dropping the cached image entry makes the provider reload and re-schedule
-    // the page; the failure back-off was just cleared so it runs immediately.
+    var error = service.errorOf(cacheKeys.first, mode);
+    for (final key in cacheKeys) {
+      service.clearFailure(key, mode);
+    }
+    // Dropping the cached image entries makes the providers reload and
+    // re-schedule the pages; the failure back-off was just cleared so they run
+    // immediately.
     PaintingBinding.instance.imageCache.clear();
     PaintingBinding.instance.imageCache.clearLiveImages();
     if (mounted) setState(() {});
@@ -455,14 +477,22 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
     }
   }
 
+  bool _isImageLiked(int imageNumber) => ImageFavoriteManager().has(
+    context.reader.cid,
+    context.reader.type.sourceKey,
+    context.reader.eid,
+    imageNumber,
+    context.reader.chapter,
+  );
+
+  /// Whether an image on screen is collected. Several can share the screen;
+  /// collecting asks which one.
   bool isLiked() {
-    return ImageFavoriteManager().has(
-      context.reader.cid,
-      context.reader.type.sourceKey,
-      context.reader.eid,
-      context.reader.page,
-      context.reader.chapter,
-    );
+    final (start, end) = context.reader.pageImageRange;
+    for (var i = start; i < end; i++) {
+      if (_isImageLiked(i + 1)) return true;
+    }
+    return false;
   }
 
   /// Whether the in-reader download button should show: only for online source
@@ -572,7 +602,7 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
           "E${context.reader.chapter}";
       var translatedTags = tags.map((e) => e.translateTagsToCN).toList();
 
-      if (isLiked()) {
+      if (_isImageLiked(page)) {
         ImageFavoriteManager().deleteImageFavorite([
           ImageFavorite(page, imageKey, null, eid, id, ep, sourceKey, epName),
         ]);
@@ -684,7 +714,10 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
       if (App.isDesktop)
         MenuEntry(
           icon: Icons.fullscreen,
-          text: "${"Full Screen".tl}(F12)",
+          text: AppShortcuts.hint(
+            "Full Screen".tl,
+            ShortcutAction.toggleFullscreen,
+          ),
           onClick: () => context.reader.fullscreen(),
         ),
       MenuEntry(icon: Icons.share, text: "Share".tl, onClick: share),
@@ -701,29 +734,24 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
 
     final buttons = [
       Tooltip(
-        message: "Night mode".tl,
+        message: AppShortcuts.hint(
+          "Night mode".tl,
+          ShortcutAction.toggleNightMode,
+        ),
         child: IconButton(
           icon: Icon(
             appdata.settings['readerNightMode'] == true
                 ? Icons.nightlight_round
                 : Icons.nightlight_outlined,
           ),
-          onPressed: () {
-            // Manual toggle takes over: stop following the system theme so the
-            // user's explicit choice isn't immediately overridden.
-            if (appdata.settings['readerNightModeFollowSystem'] == true) {
-              appdata.settings['readerNightModeFollowSystem'] = false;
-            }
-            appdata.settings['readerNightMode'] =
-                !(appdata.settings['readerNightMode'] == true);
-            appdata.saveData();
-            context.reader.update();
-            update();
-          },
+          onPressed: toggleNightMode,
         ),
       ),
       Tooltip(
-        message: "Collect the image".tl,
+        message: AppShortcuts.hint(
+          "Collect the image".tl,
+          ShortcutAction.collectImage,
+        ),
         child: IconButton(
           icon: Icon(isLiked() ? Icons.favorite : Icons.favorite_border),
           onPressed: addImageFavorite,
@@ -746,18 +774,15 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
           ),
         ),
       Tooltip(
-        message: "Auto Page Turning".tl,
+        message: AppShortcuts.hint(
+          "Auto Page Turning".tl,
+          ShortcutAction.toggleAutoPageTurning,
+        ),
         child: IconButton(
-          icon: context.reader.autoPageTurningTimer != null
-              ? const Icon(Icons.timer)
-              : const Icon(Icons.timer_sharp),
-          onPressed: () {
-            context.reader.autoPageTurning(
-              context.reader.cid,
-              context.reader.type,
-            );
-            update();
-          },
+          isSelected: context.reader.autoPageTurning,
+          icon: const Icon(Icons.timer_outlined),
+          selectedIcon: const Icon(Icons.timer),
+          onPressed: toggleAutoPageTurning,
         ),
       ),
       if (context.reader.widget.chapters != null)
@@ -886,6 +911,14 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
           )
         : SizedBox(height: bottomBarHeight, child: twoRowLayout());
 
+    if (context.reader.autoPageTurning) {
+      child = Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [buildAutoTurnBar(), child],
+      );
+    }
+
     return BlurEffect(
       child: Container(
         decoration: BoxDecoration(
@@ -907,6 +940,95 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
           ),
           child: child,
         ),
+      ),
+    );
+  }
+
+  void toggleNightMode() {
+    // Manual toggle takes over: stop following the system theme so the
+    // user's explicit choice isn't immediately overridden.
+    if (appdata.settings['readerNightModeFollowSystem'] == true) {
+      appdata.settings['readerNightModeFollowSystem'] = false;
+    }
+    appdata.settings['readerNightMode'] =
+        !(appdata.settings['readerNightMode'] == true);
+    appdata.saveData();
+    context.reader.update();
+    update();
+  }
+
+  void toggleAutoPageTurning() {
+    final reader = context.reader;
+    reader.toggleAutoPageTurning();
+    // Starting means reading on: close the menu so the countdown or the
+    // scrolling begins right away.
+    if (reader.autoPageTurning && _isOpen) {
+      openOrClose();
+    } else {
+      update();
+    }
+  }
+
+  /// Speed (scroll) or interval (page) controls, shown above the bottom bar
+  /// while auto turning is on, so it can be tuned without leaving the page.
+  Widget buildAutoTurnBar() {
+    final reader = context.reader;
+    final scrolls = reader._autoTurnScrolls;
+    final key = scrolls ? 'autoScrollSpeed' : 'autoPageTurningInterval';
+    final value = scrolls
+        ? autoScrollSpeedOf(reader.effectiveSetting(key))
+        : autoTurnIntervalOf(reader.effectiveSetting(key));
+    final min = scrolls ? autoScrollSpeedMin : autoTurnIntervalMin;
+    final max = scrolls ? autoScrollSpeedMax : autoTurnIntervalMax;
+
+    void set(int next) {
+      appdata.settings.setEffectiveReaderSetting(
+        reader.cid,
+        reader.type.sourceKey,
+        key,
+        next,
+      );
+      appdata.saveData();
+      update();
+    }
+
+    return SizedBox(
+      height: 48,
+      child: Row(
+        children: [
+          const SizedBox(width: 16),
+          Expanded(
+            child: Text(
+              (scrolls ? "Auto scroll speed" : "Auto page turning interval").tl,
+              style: ts.s14,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          IconButton(
+            tooltip: "Decrease".tl,
+            icon: const Icon(Icons.remove),
+            onPressed: value > min ? () => set(value - 1) : null,
+          ),
+          SizedBox(
+            width: 40,
+            child: Text(
+              scrolls ? '$value' : '${value}s',
+              textAlign: TextAlign.center,
+              style: ts.s14,
+            ),
+          ),
+          IconButton(
+            tooltip: "Increase".tl,
+            icon: const Icon(Icons.add),
+            onPressed: value < max ? () => set(value + 1) : null,
+          ),
+          const SizedBox(width: 4),
+          TextButton(
+            onPressed: () => reader.stopAutoPageTurning(),
+            child: Text("Stop".tl),
+          ),
+          const SizedBox(width: 8),
+        ],
       ),
     );
   }
@@ -1022,6 +1144,7 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
       ReaderSettings(
         comicId: context.reader.cid,
         comicSource: context.reader.type.sourceKey,
+        currentPageImage: _snapshotCurrentPageImage,
         onChanged: (key) {
           final scopeChanged = key == 'enabled';
           if (key == "readerMode" || scopeChanged) {
@@ -1046,6 +1169,9 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
           }
           if (key == "quickCollectImage" || scopeChanged) {
             addDragListener();
+          }
+          if (key == "readerKeepScreenOn" || scopeChanged) {
+            context.reader._syncScreenOn();
           }
           if (key == "showSystemStatusBar" || scopeChanged) {
             final showSystemStatusBar =
@@ -1072,11 +1198,55 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
             PaintingBinding.instance.imageCache.clear();
             PaintingBinding.instance.imageCache.clearLiveImages();
           }
+          if (key == "autoPageTurningInterval" ||
+              key == "autoPageTurningMode" ||
+              key == "readerMode" ||
+              scopeChanged) {
+            context.reader._syncAutoTurn(restartCountdown: true);
+          }
           context.reader.update();
         },
       ),
       width: 400,
     );
+  }
+
+  /// A caller-owned copy of the decoded page nearest the reader's centre, for
+  /// the enhancement preview. Null when no page has been decoded yet.
+  ImageInfo? _snapshotCurrentPageImage() {
+    if (!mounted) return null;
+    final readerBox = context.findRenderObject();
+    if (readerBox is! RenderBox || !readerBox.hasSize) return null;
+    final center = readerBox.localToGlobal(readerBox.size.center(Offset.zero));
+    final Iterable<State<ComicImage>> states =
+        switch (context.reader._imageViewController) {
+          final _GalleryModeState s => s.imageStates,
+          final _ContinuousModeState s => s.imageStates,
+          _ => const [],
+        };
+    ImageInfo? best;
+    var bestDistance = double.infinity;
+    for (final state in states.whereType<_ComicImageState>()) {
+      final info = state._imageInfo;
+      if (info == null || !state.mounted) continue;
+      final box = state.context.findRenderObject();
+      if (box is! RenderBox || !box.attached || !box.hasSize) continue;
+      // Kept-alive pages that aren't painted get a zero transform; their rect
+      // comes out empty or NaN and must not win.
+      final rect = MatrixUtils.transformRect(
+        box.getTransformTo(null),
+        Offset.zero & box.size,
+      );
+      if (!rect.isFinite || rect.isEmpty) continue;
+      final distance = rect.contains(center)
+          ? 0.0
+          : (rect.center - center).distance;
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = info;
+      }
+    }
+    return best?.clone();
   }
 
   void _openSideBar(Widget widget, {double width = 400}) {
@@ -1339,11 +1509,15 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
   }
 
   Future<Offset?> _showSelectImageOverlay() {
+    final reader = context.reader;
+    // Closing the menu would resume auto turning under the picker.
+    reader._autoTurnHeld = true;
     if (_isOpen) {
       openOrClose();
     }
 
     var completer = Completer<Offset?>();
+    completer.future.whenComplete(() => reader._autoTurnHeld = false);
 
     var overlay = Overlay.of(context);
     OverlayEntry? entry;

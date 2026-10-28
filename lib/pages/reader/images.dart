@@ -112,6 +112,11 @@ class _ReaderImagesState extends State<_ReaderImages> {
       }
     }
     if (!mounted) return;
+    if (error == null) {
+      reader._onChapterImagesLoaded();
+    } else {
+      reader._onChapterLoadFailed();
+    }
     context.readerScaffold.update();
   }
 
@@ -204,11 +209,7 @@ class _GalleryModeState extends State<_GalleryMode>
             true;
   }
 
-  int get totalImagePages {
-    return !reader.showSingleImageOnFirstPage()
-        ? (reader.images!.length / reader.imagesPerPage).ceil()
-        : 1 + ((reader.images!.length - 1) / reader.imagesPerPage).ceil();
-  }
+  int get totalImagePages => reader.maxPage;
 
   int get totalPages => reader.totalPages;
 
@@ -232,6 +233,11 @@ class _GalleryModeState extends State<_GalleryMode>
         return;
       }
       context.readerScaffold.setFloatingButton(0);
+    });
+    // A chapter entered by turning past the edge opens here, not through a
+    // pager settle, and still counts as a turn for the e-ink refresh.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) reader._onGallerySettled(reader.page);
     });
     _schedulePrecache(reader.page);
     super.initState();
@@ -275,31 +281,12 @@ class _GalleryModeState extends State<_GalleryMode>
     } else {
       fingers = 0;
     }
+    if (fingers == 0) _scheduleRegroup();
   }
 
   /// Get the range of images for the given page. [page] is 1-based.
-  (int start, int end) getPageImagesRange(int page) {
-    var imagesPerPage = reader.imagesPerPage;
-    if (reader.showSingleImageOnFirstPage()) {
-      if (page == 1) {
-        return (0, 1);
-      } else {
-        int startIndex = (page - 2) * imagesPerPage + 1;
-        int endIndex = math.min(
-          startIndex + imagesPerPage,
-          reader.images!.length,
-        );
-        return (startIndex, endIndex);
-      }
-    } else {
-      int startIndex = (page - 1) * imagesPerPage;
-      int endIndex = math.min(
-        startIndex + imagesPerPage,
-        reader.images!.length,
-      );
-      return (startIndex, endIndex);
-    }
-  }
+  (int start, int end) getPageImagesRange(int page) =>
+      reader.galleryLayout.imagesOf(page);
 
   /// Get the image indices for current page. Returns null if no images.
   /// Returns a single index if only one image, or a range if multiple images.
@@ -325,6 +312,10 @@ class _GalleryModeState extends State<_GalleryMode>
     // 到 2。向后保留 1 页（返回上一页时同样流畅）。超出解码窗口的页仍只下载，
     // 由 [_cachePage] 走 _preDownloadImage。
     final decodeAhead = preCacheCount.clamp(1, 2);
+    final (shownStart, shownEnd) = getPageImagesRange(startPage);
+    for (var i = shownStart; i < shownEnd; i++) {
+      _measureImage(i);
+    }
     for (int i = startPage - 1; i <= startPage + preCacheCount; i++) {
       if (i == startPage ||
           i <= 0 ||
@@ -342,10 +333,113 @@ class _GalleryModeState extends State<_GalleryMode>
     if (isChapterCommentsPage(page)) return;
     var (startIndex, endIndex) = getPageImagesRange(page);
     for (int i = startIndex; i < endIndex; i++) {
-      shouldPreCache
-          ? _precacheImage(i + 1, context)
-          : _preDownloadImage(i + 1, context);
+      if (shouldPreCache) {
+        _precacheImage(i + 1, context);
+        _measureImage(i);
+      } else {
+        _preDownloadImage(i + 1, context);
+      }
     }
+  }
+
+  // ----- Landscape images on multi-image pages -----
+  // A landscape image gets a page to itself, but whether an image is
+  // landscape is only known once it has decoded. Images are measured off the
+  // decodes the reader does anyway (the page on screen and the precache
+  // window), and the pages regroup once the pager is at rest.
+
+  final _measuredImages = <int>{};
+
+  bool _regroupPending = false;
+
+  bool _regroupScheduled = false;
+
+  /// Swaps in a fresh pager on the next build, at the page being read.
+  bool _remountPager = false;
+
+  int _pagerGeneration = 0;
+
+  void _measureImage(int index) {
+    final images = reader.images;
+    if (reader.imagesPerPage <= 1 ||
+        images == null ||
+        index < 0 ||
+        index >= images.length ||
+        !_measuredImages.add(index)) {
+      return;
+    }
+    final stream = _createImageProvider(
+      index + 1,
+      context,
+    ).resolve(createLocalImageConfiguration(context));
+    late final ImageStreamListener listener;
+    listener = ImageStreamListener(
+      (info, _) {
+        final landscape = info.image.width > info.image.height;
+        info.dispose();
+        stream.removeListener(listener);
+        if (!mounted) return;
+        if (landscape && reader.noteWideImage(index)) {
+          _regroupPending = true;
+          _scheduleRegroup();
+        }
+      },
+      onError: (_, _) {
+        stream.removeListener(listener);
+        _measuredImages.remove(index);
+      },
+    );
+    stream.addListener(listener);
+  }
+
+  void _scheduleRegroup({bool wakeFrame = true}) {
+    if (!_regroupPending || _regroupScheduled) return;
+    _regroupScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _regroupScheduled = false;
+      _regroup();
+    });
+    if (wakeFrame) WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  /// Applies a pending regroup unless something is moving or the page is
+  /// zoomed; the pager settling, fingers lifting and later builds retry.
+  void _regroup() {
+    if (!mounted || !_regroupPending) return;
+    if (fingers > 0 ||
+        reader.isPageAnimating ||
+        reader._rippleTurnPending ||
+        !controller.hasClients ||
+        controller.position.isScrollingNotifier.value ||
+        isImageZoomed ||
+        reader.isOnChapterCommentsPage) {
+      return;
+    }
+    _regroupPending = false;
+    final oldPage = reader.page;
+    final oldImages = getPageImagesRange(oldPage);
+    final newPage = reader.regroupGallery();
+    if (newPage == null) return;
+    // The page can keep its number with fewer images on it; the pager is
+    // rebuilt whenever the page being read changed in any way.
+    final remount =
+        newPage != oldPage || getPageImagesRange(newPage) != oldImages;
+    if (newPage != oldPage) {
+      // Same images under a new number: not a turn for the e-ink refresh.
+      if (reader._settledPosition == (reader.chapter, oldPage)) {
+        reader._settledPosition = (reader.chapter, newPage);
+      }
+      reader.page = newPage;
+    }
+    setState(() {
+      if (remount) {
+        _remountPager = true;
+      } else {
+        photoViewControllers.removeWhere((key, _) => key != newPage);
+      }
+    });
+    context.readerScaffold.update();
+    _schedulePrecache(newPage);
   }
 
   Widget _buildChapterCommentsPage() {
@@ -362,9 +456,42 @@ class _GalleryModeState extends State<_GalleryMode>
     );
   }
 
+  /// Fires once the pager stops moving, whether it got there by swipe, jump or
+  /// animated turn — the point where the page on screen is final.
+  bool _onPagerSettled(ScrollEndNotification notification) {
+    // Scrollables inside a page (the comments list) bubble up here too.
+    if (notification.depth != 0 || !controller.hasClients) return false;
+    _scheduleRegroup();
+    final position = controller.page;
+    if (position == null) return false;
+    final settled = position.round();
+    // Caught mid-flight by a new drag; the real settle follows.
+    if ((position - settled).abs() > 0.01) return false;
+    // Placeholder pages before the first and after the last page.
+    if (settled < 1 || settled > totalPages) return false;
+    // The neighbour hop that precedes a long animated jump.
+    final pending = reader._pendingPage;
+    if (pending != null && pending != settled) return false;
+    reader._onGallerySettled(settled);
+    return false;
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Listener(
+    if (_remountPager) {
+      _remountPager = false;
+      // The page being read changed number or images: a fresh pager there,
+      // with fresh zoom controllers, instead of reusing the old index's.
+      final old = controller;
+      controller = PageController(initialPage: reader.page);
+      WidgetsBinding.instance.addPostFrameCallback((_) => old.dispose());
+      photoViewControllers.clear();
+      _pagerGeneration++;
+    }
+    // A regroup held back by an animation or a zoom tries again after this
+    // frame; whatever cleared it is what caused the rebuild.
+    _scheduleRegroup(wakeFrame: false);
+    final gallery = Listener(
       onPointerDown: (event) {
         _increaseFingers();
       },
@@ -386,6 +513,7 @@ class _GalleryModeState extends State<_GalleryMode>
         }
       },
       child: PhotoViewGallery.builder(
+        key: ValueKey(_pagerGeneration),
         backgroundDecoration: BoxDecoration(
           color: reader.readerBackgroundColor,
         ),
@@ -503,6 +631,10 @@ class _GalleryModeState extends State<_GalleryMode>
         },
       ),
     );
+    return NotificationListener<ScrollEndNotification>(
+      onNotification: _onPagerSettled,
+      child: gallery,
+    );
   }
 
   Widget buildPageImages(List<String> images, int startIndex) {
@@ -510,23 +642,24 @@ class _GalleryModeState extends State<_GalleryMode>
         ? Axis.vertical
         : Axis.horizontal;
 
-    bool reverse = reader.mode == ReaderMode.galleryRightToLeft;
-    if (reverse) {
-      images = images.reversed.toList();
-    }
+    final order = galleryPageOrder(
+      images,
+      startIndex,
+      rightToLeft: reader.mode == ReaderMode.galleryRightToLeft,
+    );
 
     List<Widget> imageWidgets;
 
-    if (images.length == 2) {
+    if (order.length == 2) {
       imageWidgets = [
         Expanded(
           child: ComicImage(
             width: double.infinity,
             height: double.infinity,
             image: _createImageProviderFromKey(
-              images[0],
+              order[0].$1,
               context,
-              startIndex + 1,
+              order[0].$2,
             ),
             fit: BoxFit.contain,
             alignment: axis == Axis.vertical
@@ -541,9 +674,9 @@ class _GalleryModeState extends State<_GalleryMode>
             width: double.infinity,
             height: double.infinity,
             image: _createImageProviderFromKey(
-              images[1],
+              order[1].$1,
               context,
-              startIndex + 2,
+              order[1].$2,
             ),
             fit: BoxFit.contain,
             alignment: axis == Axis.vertical
@@ -555,12 +688,12 @@ class _GalleryModeState extends State<_GalleryMode>
         ),
       ];
     } else {
-      imageWidgets = images.map((imageKey) {
-        startIndex++;
+      imageWidgets = order.map((entry) {
+        final (imageKey, number) = entry;
         ImageProvider imageProvider = _createImageProviderFromKey(
           imageKey,
           context,
-          startIndex,
+          number,
         );
         return Expanded(
           child: ComicImage(
@@ -600,6 +733,9 @@ class _GalleryModeState extends State<_GalleryMode>
 
   @override
   bool jumpToChapter(int chapter, {bool toLastPage = false}) => false; // gallery keyed by chapter; uses the default remount path
+
+  @override
+  void syncAutoScroll() {} // gallery always turns pages on the reader's countdown
 
   @override
   bool get isImageZoomed {
@@ -770,6 +906,22 @@ class _GalleryModeState extends State<_GalleryMode>
   }
 }
 
+/// The images of a multi-image gallery page in the order they are laid out,
+/// each with its 1-based number in the chapter. Right-to-left reading lays
+/// them out reversed, but every image keeps its own number: translations
+/// and custom image processing are addressed by it.
+List<(String, int)> galleryPageOrder(
+  List<String> imageKeys,
+  int startIndex, {
+  required bool rightToLeft,
+}) {
+  final order = [
+    for (var i = 0; i < imageKeys.length; i++)
+      (imageKeys[i], startIndex + i + 1),
+  ];
+  return rightToLeft ? order.reversed.toList() : order;
+}
+
 const Set<PointerDeviceKind> _kTouchLikeDeviceTypes = <PointerDeviceKind>{
   PointerDeviceKind.touch,
   PointerDeviceKind.mouse,
@@ -818,6 +970,11 @@ class _ContinuousReaderEntry {
   bool get isSeparator => !isImage;
 }
 
+/// Where a continuous-mode page turn comes to rest. [lowerHalf] is the second
+/// stop of a split page turned one half at a time; it reads as the page's top
+/// on any page that is not.
+typedef _TurnStop = ({_ContinuousReaderEntry entry, bool lowerHalf});
+
 class _ContinuousModeState extends State<_ContinuousMode>
     implements _ImageViewController {
   late _ReaderState reader;
@@ -855,6 +1012,18 @@ class _ContinuousModeState extends State<_ContinuousMode>
     return 0.7;
   }
 
+  /// Only the vertical strip has a free axis to stack the halves along.
+  WidePageSplit get _widePageSplit =>
+      reader.mode == ReaderMode.continuousTopToBottom
+      ? WidePageSplit.fromSetting(
+          appdata.settings.getReaderSetting(
+            reader.cid,
+            reader.type.sourceKey,
+            'splitWidePages',
+          ),
+        )
+      : WidePageSplit.off;
+
   /// Whether the user was scrolling the page.
   /// The gesture detector has a delay to detect tap event.
   /// To handle the tap event, we need to know if the user was scrolling before the delay.
@@ -869,8 +1038,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
   final _continuousChapterLoads = <int, Future<void>>{};
   final _continuousChapterErrors = <int, String>{};
   final _continuousCachedImages = <String>{};
-  late final ContinuousPageTurnCoordinator<_ContinuousReaderEntry>
-  _pageTurnCoordinator;
+  late final ContinuousPageTurnCoordinator<_TurnStop> _pageTurnCoordinator;
   int _turnInteractionGeneration = 0;
   int? _boundaryTurnChapter;
 
@@ -982,12 +1150,17 @@ class _ContinuousModeState extends State<_ContinuousMode>
         // Best-effort warm-up; never let it break reader startup.
       }
       _onScrollPositionSettled();
+      // A chapter switched to while auto scrolling carries on, after a beat
+      // to take in the new chapter's top.
+      if (reader.autoScrollRunning) _scheduleAutoScrollResume();
     });
     super.initState();
   }
 
   @override
   void dispose() {
+    _autoScrollResumeTimer?.cancel();
+    _autoScrollEndTimer?.cancel();
     _pageTurnCoordinator.cancel();
     _scrollController.removeListener(onScroll);
     _scrollController.dispose();
@@ -1241,6 +1414,26 @@ class _ContinuousModeState extends State<_ContinuousMode>
     });
   }
 
+  /// Distance from the viewport's leading edge to the line the current page is
+  /// resolved against. Normally the leading edge (offset 1). But with
+  /// center-on-turn on, a turned-to page is parked at the viewport center,
+  /// leaving the *previous* page straddling the leading edge — resolving
+  /// against the edge would write the page back to the previous one, so the
+  /// next tap re-centers the same target and the reader looks stuck one page
+  /// in (issue #117-2 regression). Probe the center instead so the centered
+  /// page resolves as current.
+  double _readingLine(double viewExtent) {
+    final center =
+        reader.mode == ReaderMode.continuousTopToBottom &&
+        appdata.settings.getReaderSetting(
+              reader.cid,
+              reader.type.sourceKey,
+              'readerCenterPageOnTurn',
+            ) ==
+            true;
+    return center ? viewExtent / 2 : 1.0;
+  }
+
   /// Resolves the current reading position from render-box geometry (replacing
   /// ScrollablePositionedList's itemPositions listener). Drives the scaffold
   /// page indicator for both modes, and chapter-window loading for seamless.
@@ -1250,24 +1443,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
     if (box is! RenderBox) return;
     final viewportLeadingGlobal = box.localToGlobal(Offset.zero);
     final vertical = reader.mode == ReaderMode.continuousTopToBottom;
-
-    // Anchor line for resolving the current page. Normally the viewport's
-    // leading edge (offset 1). But with center-on-turn on, a turned-to page is
-    // parked at the viewport center, leaving the *previous* page straddling the
-    // leading edge — resolving against the edge would write the page back to
-    // the previous one, so the next tap re-centers the same target and the
-    // reader looks stuck one page in (issue #117-2 regression). Probe the
-    // center instead so the centered page resolves as current.
-    final center =
-        vertical &&
-        appdata.settings.getReaderSetting(
-              reader.cid,
-              reader.type.sourceKey,
-              'readerCenterPageOnTurn',
-            ) ==
-            true;
-    final viewExtent = vertical ? box.size.height : box.size.width;
-    final probe = center ? viewExtent / 2 : 1.0;
+    final probe = _readingLine(vertical ? box.size.height : box.size.width);
 
     _ContinuousReaderEntry? current;
     // Last image whose box lies entirely at/above the leading edge. When the
@@ -1420,6 +1596,199 @@ class _ContinuousModeState extends State<_ContinuousMode>
     _turnInteractionGeneration++;
     _boundaryTurnChapter = null;
     _pageTurnCoordinator.cancel();
+  }
+
+  // ----- Auto scroll -----
+  // Runs as a scroll activity, so a touch, fling, wheel or page turn simply
+  // replaces it; it comes back once the list has been left alone.
+
+  static const _autoScrollResumeDelay = Duration(milliseconds: 600);
+
+  AutoScrollActivity? _autoScrollActivity;
+  Timer? _autoScrollResumeTimer;
+
+  /// Holds the last page of a single chapter on screen before moving on.
+  Timer? _autoScrollEndTimer;
+
+  /// Sub-pixel distance owed from earlier frames.
+  double _autoScrollCarry = 0;
+
+  /// Image extent across the scroll axis; the speed is relative to it.
+  double _crossExtent = 0;
+
+  double _devicePixelRatio = 1;
+
+  @override
+  void syncAutoScroll() {
+    if (!mounted) return;
+    if (reader.autoScrollRunning) {
+      // A resume already pending keeps its delay, e.g. the beat after a touch.
+      if (_autoScrollResumeTimer == null) {
+        _scheduleAutoScrollResume(Duration.zero);
+      }
+    } else {
+      _stopAutoScroll();
+    }
+  }
+
+  void _stopAutoScroll() {
+    _autoScrollResumeTimer?.cancel();
+    _autoScrollResumeTimer = null;
+    _autoScrollEndTimer?.cancel();
+    _autoScrollEndTimer = null;
+    _autoScrollActivity?.delegate.goBallistic(0.0);
+  }
+
+  void _scheduleAutoScrollResume([Duration delay = _autoScrollResumeDelay]) {
+    _autoScrollResumeTimer?.cancel();
+    _autoScrollResumeTimer = Timer(delay, _resumeAutoScroll);
+  }
+
+  void _resumeAutoScroll() {
+    _autoScrollResumeTimer = null;
+    if (!mounted ||
+        !reader.autoScrollRunning ||
+        _autoScrollActivity != null ||
+        _autoScrollEndTimer != null) {
+      return;
+    }
+    if (!_scrollController.hasClients) {
+      _scheduleAutoScrollResume();
+      return;
+    }
+    final position = _scrollController.position;
+    // A finger, a fling, the wheel, a page turn or a popup owns the list.
+    if (fingers > 0 ||
+        position.isScrollingNotifier.value ||
+        _pageTurnCoordinator.intendedTarget != null ||
+        reader._autoTurnInterrupted) {
+      _scheduleAutoScrollResume();
+      return;
+    }
+    // Don't carry the reader past a page that hasn't appeared yet, nor start
+    // before the list has its extents: settling then has nothing to go by.
+    if (_isVisibleImageLoading() || !position.hasContentDimensions) {
+      _scheduleAutoScrollResume(const Duration(milliseconds: 300));
+      return;
+    }
+    if (position.pixels >= position.maxScrollExtent - 0.5) {
+      _onAutoScrollReachedEnd();
+      return;
+    }
+    if (position is! ScrollPositionWithSingleContext) return;
+    _futurePosition = null;
+    final activity = AutoScrollActivity(
+      position,
+      vsync: position.context.vsync,
+      nextPixels: _nextAutoScrollPixels,
+      onDispose: _onAutoScrollActivityEnded,
+    );
+    // Set first: the start notification fires inside beginActivity.
+    _autoScrollActivity = activity;
+    position.beginActivity(activity);
+  }
+
+  void _onAutoScrollActivityEnded() {
+    _autoScrollActivity = null;
+    if (mounted && reader.autoScrollRunning) _scheduleAutoScrollResume();
+  }
+
+  double? _nextAutoScrollPixels(double seconds) {
+    if (!mounted ||
+        !_scrollController.hasClients ||
+        fingers > 0 ||
+        reader._autoTurnInterrupted) {
+      return null;
+    }
+    final position = _scrollController.position;
+    if (!position.hasContentDimensions ||
+        position.pixels >= position.maxScrollExtent - 0.5 ||
+        _isVisibleImageLoading()) {
+      return null;
+    }
+    final (step, carry) = autoScrollStep(
+      _autoScrollSpeed() * seconds,
+      _autoScrollCarry,
+      _devicePixelRatio,
+    );
+    _autoScrollCarry = carry;
+    return math.min(position.pixels + step, position.maxScrollExtent);
+  }
+
+  /// Logical pixels per second.
+  double _autoScrollSpeed() {
+    final level = autoScrollSpeedOf(reader.effectiveSetting('autoScrollSpeed'));
+    return autoScrollWidthsPerSecond(level) * _crossExtent;
+  }
+
+  void _onAutoScrollReachedEnd() {
+    if (seamlessChapterReading) {
+      final last = _entries.lastOrNull;
+      if (last == null || !last.hasNext) {
+        reader.stopAutoPageTurning(
+          message: "Reached the end. Auto page turning stopped".tl,
+        );
+      } else if (last.error != null) {
+        reader.stopAutoPageTurning(message: "Auto page turning stopped".tl);
+      } else {
+        // The next chapter is loading in behind the join page.
+        _scheduleAutoScrollResume(const Duration(seconds: 1));
+      }
+      return;
+    }
+    // About as long as the last lines had while scrolling into view.
+    final viewExtent = _scrollController.position.viewportDimension;
+    final speed = _autoScrollSpeed();
+    final seconds = speed > 0 ? (viewExtent / speed / 2).clamp(1.5, 6.0) : 3.0;
+    _autoScrollEndTimer = Timer(
+      Duration(milliseconds: (seconds * 1000).round()),
+      _onAutoScrollEndHeld,
+    );
+  }
+
+  void _onAutoScrollEndHeld() {
+    _autoScrollEndTimer = null;
+    if (!mounted || !reader.autoScrollRunning) return;
+    final position = _scrollController.hasClients
+        ? _scrollController.position
+        : null;
+    if (position == null ||
+        position.pixels < position.maxScrollExtent - 0.5 ||
+        reader._autoTurnInterrupted) {
+      // Scrolled back up meanwhile, or a popup is up: decide again later.
+      _scheduleAutoScrollResume();
+      return;
+    }
+    context.readerScaffold.setFloatingButton(0);
+    if (!reader.toNextChapter()) {
+      reader.stopAutoPageTurning(
+        message: "Reached the end. Auto page turning stopped".tl,
+      );
+    }
+  }
+
+  /// Whether a page on screen is still waiting for its image.
+  bool _isVisibleImageLoading() {
+    final viewportBox = context.findRenderObject();
+    if (viewportBox is! RenderBox || !viewportBox.hasSize) return false;
+    final viewport = viewportBox.localToGlobal(Offset.zero) & viewportBox.size;
+    for (final state in imageStates.whereType<_ComicImageState>()) {
+      if (!state.mounted ||
+          state._imageInfo != null ||
+          state._lastException != null) {
+        continue;
+      }
+      final box = state.context.findRenderObject();
+      if (box is! RenderBox || !box.attached || !box.hasSize) continue;
+      final rect = MatrixUtils.transformRect(
+        box.getTransformTo(null),
+        Offset.zero & box.size,
+      );
+      if (rect.isFinite && !rect.isEmpty && rect.overlaps(viewport)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /// Entry [_cacheAround] last ran for; the scroll listener settles every
@@ -1612,6 +1981,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
           width: width,
           height: height,
           fit: BoxFit.contain,
+          widePageSplit: _widePageSplit,
           onInit: (state) => imageStates.add(state),
           onDispose: (state) => imageStates.remove(state),
         ),
@@ -1750,6 +2120,9 @@ class _ContinuousModeState extends State<_ContinuousMode>
             disableScroll = true;
           });
         }
+        // Don't leave the chapter from under a finger; releasing re-decides.
+        _autoScrollEndTimer?.cancel();
+        _autoScrollEndTimer = null;
         _futurePosition = null;
         if (_isMouseScrolling) {
           setState(() {
@@ -1763,6 +2136,9 @@ class _ContinuousModeState extends State<_ContinuousMode>
           setState(() {
             disableScroll = false;
           });
+        }
+        if (fingers == 0 && reader.autoScrollRunning) {
+          _scheduleAutoScrollResume();
         }
         if (!seamlessChapterReading && fingers == 0) {
           if (jumpToPrevChapter) {
@@ -1780,6 +2156,9 @@ class _ContinuousModeState extends State<_ContinuousMode>
           setState(() {
             disableScroll = false;
           });
+        }
+        if (fingers == 0 && reader.autoScrollRunning) {
+          _scheduleAutoScrollResume();
         }
       },
       onPointerPanZoomUpdate: (event) {
@@ -1820,12 +2199,15 @@ class _ContinuousModeState extends State<_ContinuousMode>
       onNotification: (notification) {
         if (_repivoting) return true;
         if (notification is ScrollStartNotification) {
-          delayedSetIsScrolling(true);
+          // A tap during auto scroll should open the menu, not just stop a
+          // fling the way it does after a swipe.
+          if (_autoScrollActivity == null) delayedSetIsScrolling(true);
           if (notification.dragDetails != null) {
             _cancelProgrammaticPageTurn();
           }
         } else if (notification is ScrollEndNotification) {
           delayedSetIsScrolling(false);
+          if (reader.autoScrollRunning) _scheduleAutoScrollResume();
         }
 
         var scale = photoViewController.scale ?? 1.0;
@@ -1890,6 +2272,8 @@ class _ContinuousModeState extends State<_ContinuousMode>
         reader.mode == ReaderMode.continuousTopToBottom) {
       width = height * widthRatio;
     }
+    _crossExtent = _axis == Axis.vertical ? width : height;
+    _devicePixelRatio = MediaQuery.devicePixelRatioOf(context);
 
     return buildPointerLayer(
       PhotoView.customChild(
@@ -1967,6 +2351,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
     int page, {
     required bool animate,
     bool center = false,
+    bool lowerHalf = false,
     bool Function()? isCurrent,
     double? maxStepExtent,
   }) async {
@@ -1980,7 +2365,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
       }
       // The pivot is the one entry whose offset is exact by construction.
       await _applyScroll(
-        0 - _centerAdjust(chapter, page, center),
+        _landingOffset(chapter, page, center, lowerHalf),
         animate: animate,
       );
       return;
@@ -1993,8 +2378,8 @@ class _ContinuousModeState extends State<_ContinuousMode>
     if (delta != null) {
       await _applyScroll(
         _scrollController.position.pixels +
-            delta -
-            _centerAdjust(chapter, page, center),
+            delta +
+            _landingOffset(chapter, page, center, lowerHalf),
         animate: animate,
       );
       return;
@@ -2029,7 +2414,9 @@ class _ContinuousModeState extends State<_ContinuousMode>
       final refIdx = _indexOfEntry(ref.chapter, ref.page);
       if (refIdx == targetIdx) {
         await _applyScroll(
-          pos.pixels + refDelta - _centerAdjust(chapter, page, center),
+          pos.pixels +
+              refDelta +
+              _landingOffset(chapter, page, center, lowerHalf),
           animate: animate,
         );
         return;
@@ -2055,8 +2442,8 @@ class _ContinuousModeState extends State<_ContinuousMode>
       if (d != null) {
         await _applyScroll(
           _scrollController.position.pixels +
-              d -
-              _centerAdjust(chapter, page, center),
+              d +
+              _landingOffset(chapter, page, center, lowerHalf),
           animate: animate,
         );
         return;
@@ -2108,23 +2495,67 @@ class _ContinuousModeState extends State<_ContinuousMode>
     }
   }
 
-  /// When [center] is on (and vertical), the extra scroll-back offset that
-  /// moves the target page from the viewport's leading edge to vertically
-  /// centered. Only when the page is shorter than the viewport; taller pages
-  /// stay pinned to the top so their top isn't clipped (issue #117-2).
-  double _centerAdjust(int chapter, int page, bool center) {
-    if (!center || reader.mode != ReaderMode.continuousTopToBottom) {
+  /// Where the viewport's leading edge comes to rest relative to the target
+  /// page's: half way down for the [lowerHalf] of a page turned by halves, and
+  /// with [center] on, above it so a page — or the half of one — shorter than
+  /// the viewport sits vertically centered. Taller pages stay pinned to the top
+  /// so their top isn't clipped (issue #117-2).
+  double _landingOffset(int chapter, int page, bool center, bool lowerHalf) {
+    if ((!center && !lowerHalf) ||
+        reader.mode != ReaderMode.continuousTopToBottom) {
       return 0;
     }
     final ctx = _itemKeys['$chapter:$page']?.currentContext;
     final box = ctx?.findRenderObject();
     if (box is! RenderBox || !box.attached) return 0;
-    final pageExtent = box.size.height;
+    final halves = _turnsByHalves(ctx!, box);
+    final stopExtent = halves ? box.size.height / 2 : box.size.height;
+    var offset = halves && lowerHalf ? stopExtent : 0.0;
     final viewExtent = reader.size.height;
-    if (pageExtent >= viewExtent) return 0;
-    // Positive value: subtracted from the leading-edge target so equal margins
-    // sit above and below the page.
-    return (viewExtent - pageExtent) / 2;
+    if (center && stopExtent < viewExtent) {
+      offset -= (viewExtent - stopExtent) / 2;
+    }
+    return offset;
+  }
+
+  /// Whether a page turn stops on each half of this page: it is shown split
+  /// and too tall for one screen, so a turn to the next page would skip the
+  /// part of its lower half that never came into view.
+  bool _turnsByHalves(BuildContext pageContext, RenderBox box) {
+    if (box.size.height <= reader.size.height) return false;
+    var split = false;
+    void visit(Element element) {
+      if (element is StatefulElement && element.state is _ComicImageState) {
+        split = (element.state as _ComicImageState).isShownSplit;
+        return;
+      }
+      element.visitChildren(visit);
+    }
+
+    (pageContext as Element).visitChildren(visit);
+    return split;
+  }
+
+  bool _entryTurnsByHalves(_ContinuousReaderEntry entry) {
+    if (!entry.isImage || _widePageSplit == WidePageSplit.off) return false;
+    final ctx = _itemKeys['${entry.chapter}:${entry.page}']?.currentContext;
+    final box = ctx?.findRenderObject();
+    if (box is! RenderBox || !box.attached) return false;
+    return _turnsByHalves(ctx!, box);
+  }
+
+  bool _isOnLowerHalf(_ContinuousReaderEntry entry) {
+    final ctx = _itemKeys['${entry.chapter}:${entry.page}']?.currentContext;
+    final box = ctx?.findRenderObject();
+    final start = _offsetDeltaToEntry(entry.chapter, entry.page);
+    if (box is! RenderBox || start == null) return false;
+    final viewExtent = reader.size.height;
+    return isReadingLowerHalf(
+      pageStart: start,
+      pageExtent: box.size.height,
+      viewExtent: viewExtent,
+      readingLine: _readingLine(viewExtent),
+    );
   }
 
   /// Continuous-mode page turn: move to the adjacent *image* entry in the flat
@@ -2139,21 +2570,25 @@ class _ContinuousModeState extends State<_ContinuousMode>
     final intended = _pageTurnCoordinator.intendedTarget;
     final curIdx = intended == null
         ? _indexOfEntry(reader.chapter, reader.page)
-        : _indexOfEntry(intended.chapter, intended.page);
+        : _indexOfEntry(intended.entry.chapter, intended.entry.page);
+    final current = intended?.entry ?? _entries[curIdx];
+    // A split page taller than the screen takes two turns, one per half.
+    if (_entryTurnsByHalves(current)) {
+      final onLower = intended?.lowerHalf ?? _isOnLowerHalf(current);
+      if (forward != onLower) {
+        _requestTurn((entry: current, lowerHalf: forward));
+        return true;
+      }
+    }
     final step = forward ? 1 : -1;
     for (var i = curIdx + step; i >= 0 && i < _entries.length; i += step) {
       final entry = _entries[i];
       if (!entry.isImage) continue;
-      if (_boundaryTurnChapter != null) {
-        _turnInteractionGeneration++;
-        _boundaryTurnChapter = null;
-      }
-      _futurePosition = null;
-      unawaited(_pageTurnCoordinator.request(entry));
+      // Turning back lands on the previous page's last half.
+      _requestTurn((entry: entry, lowerHalf: !forward));
       return true;
     }
     if (seamlessChapterReading) {
-      final current = intended ?? _entries[curIdx];
       final chapterImages = _continuousChapterImages[current.chapter];
       final atBoundary =
           current.isImage &&
@@ -2172,10 +2607,20 @@ class _ContinuousModeState extends State<_ContinuousMode>
     return false;
   }
 
+  void _requestTurn(_TurnStop stop) {
+    if (_boundaryTurnChapter != null) {
+      _turnInteractionGeneration++;
+      _boundaryTurnChapter = null;
+    }
+    _futurePosition = null;
+    unawaited(_pageTurnCoordinator.request(stop));
+  }
+
   Future<void> _prepareTurnTarget(
-    _ContinuousReaderEntry entry,
+    _TurnStop stop,
     bool Function() isCurrent,
   ) async {
+    final entry = stop.entry;
     if (!mounted || !entry.isImage) return;
     try {
       await _precacheImageEntry(entry, context);
@@ -2185,9 +2630,10 @@ class _ContinuousModeState extends State<_ContinuousMode>
   }
 
   Future<void> _navigateTurnTarget(
-    _ContinuousReaderEntry entry,
+    _TurnStop stop,
     bool Function() isCurrent,
   ) {
+    final entry = stop.entry;
     if (!mounted || !entry.isImage || !isCurrent()) return Future.value();
     final center =
         appdata.settings.getReaderSetting(
@@ -2203,6 +2649,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
       entry.page,
       animate: animate,
       center: center,
+      lowerHalf: stop.lowerHalf,
       isCurrent: isCurrent,
       maxStepExtent:
           (reader.mode == ReaderMode.continuousTopToBottom
@@ -2234,8 +2681,8 @@ class _ContinuousModeState extends State<_ContinuousMode>
                   entry.page == targetPage,
             );
             if (targets.isEmpty) return;
-            final target = targets.first;
-            unawaited(_pageTurnCoordinator.request(target));
+            final stop = (entry: targets.first, lowerHalf: !forward);
+            unawaited(_pageTurnCoordinator.request(stop));
           })
           .whenComplete(() {
             if (_boundaryTurnChapter == chapter) {

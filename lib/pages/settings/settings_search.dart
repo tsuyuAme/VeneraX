@@ -49,7 +49,15 @@ class _SettingsSearchEntry {
     'The number of pic in screen for landscape (Only Gallery Mode)' ||
     'The number of pic in screen for portrait (Only Gallery Mode)' ||
     'Show single image on first page' ||
-    'Fill screen' => 'Reading mode',
+    'Fill screen' ||
+    'Auto page turning mode' => 'Reading mode',
+    // Only one of the two shows at a time, by auto turning mode.
+    'Auto scroll speed' => 'Auto page turning interval',
+    'Auto page turning interval' => 'Auto scroll speed',
+    'Refresh color' ||
+    'Refresh every N pages' ||
+    'Refresh duration (ms)' => 'Full refresh on page turn',
+    'Ripple speed' => 'Ripple page turn',
     _ => null,
   };
 
@@ -58,7 +66,9 @@ class _SettingsSearchEntry {
       if (title == 'Language' || title == 'Authorization Required') {
         return 'User';
       }
-      if (title == 'Minimize to tray') return 'Window';
+      if (title == 'Minimize to tray' || title == 'Keyboard shortcuts') {
+        return 'Window';
+      }
       return 'Appearance';
     }
     if (category == 1) {
@@ -92,11 +102,22 @@ class _SettingsSearchEntry {
         'Night mode intensity',
         'Display time & battery info in reader',
         'Show system status bar',
+        'Keep screen on while reading',
         'Show Page Number',
         'Show Chapter Comments',
         'Show Comments at Chapter End',
       ].contains(title)) {
         return 'Display settings';
+      }
+      if (const [
+        'Full refresh on page turn',
+        'Refresh color',
+        'Refresh every N pages',
+        'Refresh duration (ms)',
+        'Ripple page turn',
+        'Ripple speed',
+      ].contains(title)) {
+        return 'E-ink screen';
       }
     }
     return null;
@@ -157,7 +178,13 @@ final _settingsSearchIndex = <_SettingsSearchEntry>[
   _SettingsSearchEntry("Follow system dark mode", 1, keywords: ["dark"]),
   _SettingsSearchEntry("Night mode color", 1, keywords: ["dark"]),
   _SettingsSearchEntry("Night mode intensity", 1, keywords: ["dark"]),
+  _SettingsSearchEntry(
+    "Auto page turning mode",
+    1,
+    keywords: ["auto", "scroll"],
+  ),
   _SettingsSearchEntry("Auto page turning interval", 1, keywords: ["auto"]),
+  _SettingsSearchEntry("Auto scroll speed", 1, keywords: ["auto", "scroll"]),
   _SettingsSearchEntry("Mouse scroll speed", 1, keywords: ["scroll"]),
   _SettingsSearchEntry("Number of images preloaded", 1, keywords: ["preload"]),
   _SettingsSearchEntry("Double tap to zoom", 1, keywords: ["gesture", "zoom"]),
@@ -188,12 +215,38 @@ final _settingsSearchIndex = <_SettingsSearchEntry>[
   _SettingsSearchEntry("Color vibrance", 1, keywords: ["enhance"]),
   _SettingsSearchEntry("Display time & battery info in reader", 1),
   _SettingsSearchEntry("Show system status bar", 1),
+  _SettingsSearchEntry(
+    "Keep screen on while reading",
+    1,
+    keywords: ["screen", "awake", "sleep"],
+    visible: () => App.isMobile,
+  ),
   _SettingsSearchEntry("Show Page Number", 1),
   _SettingsSearchEntry("Show Chapter Comments", 1, keywords: ["comment"]),
   _SettingsSearchEntry(
     "Show Comments at Chapter End",
     1,
     keywords: ["comment"],
+  ),
+  _SettingsSearchEntry(
+    "Full refresh on page turn",
+    1,
+    keywords: ["E-ink screen", "Ghosting"],
+  ),
+  _SettingsSearchEntry("Refresh color", 1, keywords: ["E-ink screen"]),
+  _SettingsSearchEntry("Refresh every N pages", 1, keywords: ["E-ink screen"]),
+  _SettingsSearchEntry("Refresh duration (ms)", 1, keywords: ["E-ink screen"]),
+  _SettingsSearchEntry(
+    "Ripple page turn",
+    1,
+    keywords: ["E-ink screen"],
+    visible: () => EinkPanel.rippleSupported,
+  ),
+  _SettingsSearchEntry(
+    "Ripple speed",
+    1,
+    keywords: ["E-ink screen"],
+    visible: () => EinkPanel.rippleSupported,
   ),
   _SettingsSearchEntry(
     "AI Translation",
@@ -203,6 +256,11 @@ final _settingsSearchIndex = <_SettingsSearchEntry>[
   _SettingsSearchEntry("LLM providers", 8, keywords: ["API", "model"]),
   _SettingsSearchEntry('Source language', 8, keywords: ['language']),
   _SettingsSearchEntry('Target language', 8, keywords: ['language']),
+  _SettingsSearchEntry(
+    'Custom languages',
+    8,
+    keywords: ['language', 'OCR', 'model'],
+  ),
   _SettingsSearchEntry('Test translation', 8, keywords: ['API', 'test']),
   _SettingsSearchEntry(
     "Custom translation script",
@@ -297,6 +355,12 @@ final _settingsSearchIndex = <_SettingsSearchEntry>[
     0,
     keywords: ["tray", "window"],
     visible: () => App.isWindows,
+  ),
+  _SettingsSearchEntry(
+    "Keyboard shortcuts",
+    0,
+    keywords: ["hotkey", "shortcut", "keyboard", "Fullscreen"],
+    visible: () => App.isDesktop,
   ),
 
   // --- 5: Network ---

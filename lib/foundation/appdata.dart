@@ -166,6 +166,14 @@ class Appdata with Init {
     // device's own system animations look like, so it stays with the device
     // (#194) rather than travelling from one phone to a tablet or desktop.
     "enablePredictiveBack",
+    // E-ink refresh is tuned to this device's panel; a phone or desktop
+    // receiving it would flash on every page turn.
+    "einkFullRefresh",
+    "einkRefreshColor",
+    "einkRefreshInterval",
+    "einkRefreshDuration",
+    "einkRipplePageTurn",
+    "einkRippleSpeed",
     // Throughput presets and their raw values are device-local. A desktop's
     // custom concurrency must never replace a phone's memory-safe tuning.
     "imageTranslationPerformancePreset",
@@ -173,6 +181,9 @@ class Appdata with Init {
     "imageTranslationOcrWorkers",
     "imageTranslationImageConcurrency",
     "imageTranslationLlmConcurrency",
+    // Shortcuts follow the machine: modifiers differ between macOS and the
+    // rest, and a global hotkey free on one PC may be taken on another.
+    "keyboardShortcuts",
   ];
 
   /// [customFields] are the user's `disableSyncFields` entries; category
@@ -384,6 +395,10 @@ class Settings with ChangeNotifier {
     'blockedCommentWords': [],
     'defaultSearchTarget': null,
     'autoPageTurningInterval': 5, // in seconds
+    // Continuous modes only: 'scroll' replaces page turns with steady
+    // scrolling at autoScrollSpeed. See foundation/auto_page_turning.dart.
+    'autoPageTurningMode': 'page', // page, scroll
+    'autoScrollSpeed': 15, // 1 - 30, higher is faster
     'readerMode': 'galleryLeftToRight', // values of [ReaderMode]
     'enableContinuousChapterReading': true,
     'readerScreenPicNumberForLandscape': 1, // 1 - 5
@@ -420,6 +435,9 @@ class Settings with ChangeNotifier {
     'imageWidthPercent': 70,
     // Desktop only: enter fullscreen automatically when the reader opens.
     'autoFullscreenOnRead': false,
+    // Desktop keyboard shortcut overrides, action name -> encoded binding
+    // ('' = unbound). Absent actions use the defaults in AppShortcuts.
+    'keyboardShortcuts': <String, dynamic>{},
     // Drop a comic from "Read Later" once reading it starts; history takes over
     // from there.
     'autoRemoveFromReadLater': false,
@@ -491,6 +509,9 @@ class Settings with ChangeNotifier {
     // order and are synced with the rest of the user's settings.
     'chapterOrderOverrides': <String, dynamic>{},
     'showSystemStatusBar': false,
+    // Mobile only: hold off the screen timeout for the whole reading session,
+    // not just while auto page turning.
+    'readerKeepScreenOn': false,
     'comicSpecificSettings': <String, Map<String, dynamic>>{},
     'deviceSpecificSettings': <String, Map<String, dynamic>>{},
     'deviceId': '',
@@ -500,6 +521,8 @@ class Settings with ChangeNotifier {
     'readerCenterPageOnTurn': false,
     // 连续模式相邻图片之间的间隙（逻辑像素，0 = 紧贴）。
     'readerPageSpacing': 0.0, // 0 - 50
+    // Continuous (top to bottom): cut landscape pages into stacked halves.
+    'splitWidePages': 'off', // off, rightFirst, leftFirst
     'localFavoritesFirst': true,
     'autoCloseFavoritePanel': false,
     'showChapterComments': true, // show chapter comments in reader
@@ -521,13 +544,31 @@ class Settings with ChangeNotifier {
     'readerImageEnhanceClarity': 0.0, // 0.0 - 1.0 mid-radius local contrast
     'readerImageEnhanceContrast': 0.0, // 0.0 - 1.0 level-stretch amount
     'readerImageEnhanceVibrance': 0.0, // 0.0 - 1.0 colour-page saturation lift
+    // E-ink full refresh in gallery modes (see EinkRefresher). Device-local:
+    // flashing only helps an e-ink panel, so it must not follow sync to a phone.
+    'einkFullRefresh': false,
+    'einkRefreshColor': 'white', // white, black, blackThenWhite
+    'einkRefreshInterval': 1, // page turns between refreshes, 1 - 10
+    'einkRefreshDuration': 150, // ms per refresh frame, 50 - 1000
+    // Native page-turn ripple on supported e-readers (see EinkPanel). While
+    // on, it replaces the slide animation of tap and key turns in gallery modes.
+    'einkRipplePageTurn': false,
+    'einkRippleSpeed': 'standard', // slower, standard, faster
     // 本地漫画翻译（模型按需下载，见 foundation/image_translation/）。
     // 注意：翻译是否开启按漫画独立存储于 implicitData
     // ['imageTranslationEnabledComics']，不走这里的全局阅读器设置通道——翻译
     // 消耗 token，绝不能一开即对所有漫画全局生效。此键为历史遗留，已不再读取。
     'enableImageTranslation': false,
-    'imageTranslationSource': 'auto', // auto, ja, zh, en, ko
-    'imageTranslationTarget': 'zh', // zh, zh-TW, en
+    'imageTranslationSource': 'auto', // auto or a code from TranslationSources
+    'imageTranslationTarget': 'zh', // a code from TranslationTargets
+    // User-added target languages, [{code, name}]; synced like providers.
+    'imageTranslationCustomTargets': <dynamic>[],
+    // User-added source languages with their own recognition model
+    // [{code, name, model, dict, height, size}], and an optional replacement
+    // detector {url, size}. Synced; the model files themselves are not, so
+    // each device downloads them.
+    'imageTranslationCustomSources': <dynamic>[],
+    'imageTranslationCustomDetector': <String, dynamic>{},
     'imageTranslationHfEndpoint':
         'https://huggingface.co', // model download endpoint (mirrorable)
     // 用户自己的 OpenAI 兼容端点；App 不预置任何站点或密钥。
@@ -615,6 +656,23 @@ class Settings with ChangeNotifier {
       () => <String, dynamic>{},
     )[key] = value;
     notifyListeners();
+  }
+
+  /// Writes [key] into the scope [getReaderSetting] reads it from: the
+  /// comic's own settings when enabled, else this device's, else global.
+  void setEffectiveReaderSetting(
+    String? comicId,
+    String? sourceKey,
+    String key,
+    dynamic value,
+  ) {
+    if (isComicSpecificSettingsEnabled(comicId, sourceKey)) {
+      setReaderSetting(comicId!, sourceKey!, key, value);
+    } else if (isDeviceSpecificSettingsEnabled()) {
+      setDeviceReaderSetting(key, value);
+    } else {
+      this[key] = value;
+    }
   }
 
   void resetComicReaderSettings(String key) {

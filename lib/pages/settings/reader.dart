@@ -7,12 +7,17 @@ class ReaderSettings extends StatefulWidget {
     this.comicId,
     this.comicSource,
     this.translationOnly = false,
+    this.currentPageImage,
   });
 
   final void Function(String key)? onChanged;
   final String? comicId;
   final String? comicSource;
   final bool translationOnly;
+
+  /// Caller-owned copy of the page open in the reader, for the image
+  /// enhancement preview. Null outside the reader.
+  final ImageInfo? Function()? currentPageImage;
 
   @override
   State<ReaderSettings> createState() => _ReaderSettingsState();
@@ -27,6 +32,11 @@ class _ReaderSettingsState extends State<ReaderSettings> {
     _translationAdvanced =
         TranslationPerformanceConfig.current ==
         TranslationPerformancePreset.custom;
+    // The startup probe normally finished long ago; if not, show the ripple
+    // rows as soon as it does.
+    if (!EinkPanel.rippleProbed) {
+      EinkPanel.probeRipple().then((_) => refreshSettings());
+    }
   }
 
   void _setTranslationPreset(String value) {
@@ -97,6 +107,35 @@ class _ReaderSettingsState extends State<ReaderSettings> {
 
   String _effectiveTargetLang() => _effectiveTranslationConfig().targetLang;
 
+  /// Built-in targets, then the user's own. A selected code that is no longer
+  /// listed (a removed custom language) stays visible under its raw code
+  /// instead of showing as blank.
+  Map<String, String> _targetLanguageOptions() {
+    var options = {
+      for (var e in TranslationTargets.builtIn.entries) e.key: e.value.label.tl,
+      for (var e in TranslationTargets.custom) e.code: e.name,
+    };
+    var current = _effectiveTargetLang();
+    options.putIfAbsent(current, () => current);
+    return options;
+  }
+
+  /// Auto, built-in sources, then the user's own; a removed custom language
+  /// still selected shows under its code.
+  Map<String, String> _sourceLanguageOptions() {
+    var options = {
+      'auto': "Auto detect".tl,
+      for (var e in TranslationSources.builtIn.entries) e.key: e.value.tl,
+      for (var e in TranslationSources.custom) e.code: e.name,
+    };
+    var current = _effectiveSourceLang();
+    options.putIfAbsent(current, () => current);
+    return options;
+  }
+
+  int _customLanguageCount() =>
+      TranslationSources.custom.length + TranslationTargets.custom.length;
+
   /// Summary line for the LLM-providers entry: the active provider's name (or
   /// its URL when unnamed), how many others are configured, or "Not configured".
   String _activeProviderSubtitle() {
@@ -154,6 +193,11 @@ class _ReaderSettingsState extends State<ReaderSettings> {
               section(
                 "How to use".tl,
                 "Translation is turned on per comic, not globally, because it uses your API tokens. Open a comic, turn on \"Translate pages while reading\", and pages translate as you read. To translate ahead of time, use Pre-translate from the comic's menu."
+                    .tl,
+              ),
+              section(
+                "Target language".tl,
+                "Language not in the list? Open Custom languages, tap + next to Target languages and enter a name (what the AI model translates into, e.g. ไทย) and a code (used by Google Translate and scripts, e.g. th). It then appears in Target language. Removing it later keeps the pages already translated."
                     .tl,
               ),
               section(
@@ -227,21 +271,12 @@ class _ReaderSettingsState extends State<ReaderSettings> {
   }
 
   void _writeEffectiveSetting(String key, dynamic value) {
-    if (appdata.settings.isComicSpecificSettingsEnabled(
+    appdata.settings.setEffectiveReaderSetting(
       widget.comicId,
       widget.comicSource,
-    )) {
-      appdata.settings.setReaderSetting(
-        widget.comicId!,
-        widget.comicSource!,
-        key,
-        value,
-      );
-    } else if (appdata.settings.isDeviceSpecificSettingsEnabled()) {
-      appdata.settings.setDeviceReaderSetting(key, value);
-    } else {
-      appdata.settings[key] = value;
-    }
+      key,
+      value,
+    );
   }
 
   void _onShowChapterCommentsChanged() {
@@ -507,22 +542,64 @@ class _ReaderSettingsState extends State<ReaderSettings> {
                       : null,
                   useDeviceSettings: useDeviceSpecificSettings,
                 ),
-              _SliderSetting(
-                title: "Auto page turning interval".tl,
-                settingsIndex: "autoPageTurningInterval",
-                interval: 1,
-                min: 1,
-                max: 20,
-                onChanged: () {
-                  setState(() {});
-                  widget.onChanged?.call("autoPageTurningInterval");
-                },
-                comicId: isEnabledSpecificSettings ? widget.comicId : null,
-                comicSource: isEnabledSpecificSettings
-                    ? widget.comicSource
-                    : null,
-                useDeviceSettings: useDeviceSpecificSettings,
-              ),
+              if ((_effectiveSetting('readerMode') as String?)?.startsWith(
+                    'continuous',
+                  ) ??
+                  false)
+                SelectSetting(
+                  title: "Auto page turning mode".tl,
+                  settingKey: "autoPageTurningMode",
+                  optionTranslation: {
+                    autoTurnModePage: "Turn pages".tl,
+                    autoTurnModeScroll: "Scroll".tl,
+                  },
+                  onChanged: () {
+                    setState(() {});
+                    widget.onChanged?.call("autoPageTurningMode");
+                  },
+                  comicId: isEnabledSpecificSettings ? widget.comicId : null,
+                  comicSource: isEnabledSpecificSettings
+                      ? widget.comicSource
+                      : null,
+                  useDeviceSettings: useDeviceSpecificSettings,
+                ),
+              // In scroll mode the interval gives way to a speed.
+              if (autoTurnScrolls(
+                (_effectiveSetting('readerMode') as String?) ?? '',
+                _effectiveSetting('autoPageTurningMode'),
+              ))
+                _SliderSetting(
+                  title: "Auto scroll speed".tl,
+                  settingsIndex: "autoScrollSpeed",
+                  interval: 1,
+                  min: autoScrollSpeedMin.toDouble(),
+                  max: autoScrollSpeedMax.toDouble(),
+                  onChanged: () {
+                    widget.onChanged?.call("autoScrollSpeed");
+                  },
+                  comicId: isEnabledSpecificSettings ? widget.comicId : null,
+                  comicSource: isEnabledSpecificSettings
+                      ? widget.comicSource
+                      : null,
+                  useDeviceSettings: useDeviceSpecificSettings,
+                )
+              else
+                _SliderSetting(
+                  title: "Auto page turning interval".tl,
+                  settingsIndex: "autoPageTurningInterval",
+                  interval: 1,
+                  min: autoTurnIntervalMin.toDouble(),
+                  max: autoTurnIntervalMax.toDouble(),
+                  onChanged: () {
+                    setState(() {});
+                    widget.onChanged?.call("autoPageTurningInterval");
+                  },
+                  comicId: isEnabledSpecificSettings ? widget.comicId : null,
+                  comicSource: isEnabledSpecificSettings
+                      ? widget.comicSource
+                      : null,
+                  useDeviceSettings: useDeviceSpecificSettings,
+                ),
               if ((_effectiveSetting('readerMode') as String?)?.startsWith(
                     'continuous',
                   ) ??
@@ -552,6 +629,28 @@ class _ReaderSettingsState extends State<ReaderSettings> {
                   settingKey: "readerCenterPageOnTurn",
                   onChanged: () {
                     widget.onChanged?.call("readerCenterPageOnTurn");
+                  },
+                  comicId: isEnabledSpecificSettings ? widget.comicId : null,
+                  comicSource: isEnabledSpecificSettings
+                      ? widget.comicSource
+                      : null,
+                  useDeviceSettings: useDeviceSpecificSettings,
+                ),
+              if ((_effectiveSetting('readerMode') as String?) ==
+                  'continuousTopToBottom')
+                SelectSetting(
+                  title: "Split wide pages".tl,
+                  settingKey: "splitWidePages",
+                  optionTranslation: {
+                    "off": "Off".tl,
+                    "rightFirst": "Right half on top".tl,
+                    "leftFirst": "Left half on top".tl,
+                  },
+                  help:
+                      "Cuts a landscape page, usually two pages scanned as one, down the middle and stacks the halves so each fills the screen width. For comics read right to left, choose \"Right half on top\"."
+                          .tl,
+                  onChanged: () {
+                    widget.onChanged?.call("splitWidePages");
                   },
                   comicId: isEnabledSpecificSettings ? widget.comicId : null,
                   comicSource: isEnabledSpecificSettings
@@ -807,6 +906,12 @@ class _ReaderSettingsState extends State<ReaderSettings> {
                 },
               ),
               if (appdata.settings['enableReaderImageEnhance'] == true) ...[
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+                  child: ImageEnhancePreview(
+                    pageImage: widget.currentPageImage,
+                  ),
+                ),
                 _SliderSetting(
                   title: "Sharpen strength".tl,
                   settingsIndex: "readerImageEnhanceStrength",
@@ -958,6 +1063,19 @@ class _ReaderSettingsState extends State<ReaderSettings> {
                     : null,
                 useDeviceSettings: useDeviceSpecificSettings,
               ),
+              if (App.isMobile)
+                _SwitchSetting(
+                  title: "Keep screen on while reading".tl,
+                  settingKey: "readerKeepScreenOn",
+                  onChanged: () {
+                    widget.onChanged?.call("readerKeepScreenOn");
+                  },
+                  comicId: isEnabledSpecificSettings ? widget.comicId : null,
+                  comicSource: isEnabledSpecificSettings
+                      ? widget.comicSource
+                      : null,
+                  useDeviceSettings: useDeviceSpecificSettings,
+                ),
               _SwitchSetting(
                 title: "Show Page Number".tl,
                 settingKey: "showPageNumberInReader",
@@ -1003,6 +1121,68 @@ class _ReaderSettingsState extends State<ReaderSettings> {
                       : null,
                   useDeviceSettings: useDeviceSpecificSettings,
                 ),
+            ],
+          ).toSliver(),
+          // Device-local panel tuning (see _disableSync), so these rows edit
+          // the global value even when opened for a comic.
+          _SettingsExpansionTile(
+            expansionKey: const PageStorageKey('readerEinkGroup'),
+            icon: Icons.chrome_reader_mode_outlined,
+            title: "E-ink screen".tl,
+            children: [
+              _SwitchSetting(
+                title: "Full refresh on page turn".tl,
+                subtitle:
+                    "Briefly fill the screen with a solid color after turning a page to clear ghosting. Gallery modes only"
+                        .tl,
+                settingKey: "einkFullRefresh",
+                onChanged: () => setState(() {}),
+              ),
+              if (appdata.settings['einkFullRefresh'] == true) ...[
+                SelectSetting(
+                  title: "Refresh color".tl,
+                  settingKey: "einkRefreshColor",
+                  optionTranslation: {
+                    "white": "White".tl,
+                    "black": "Black".tl,
+                    "blackThenWhite": "Black, then white".tl,
+                  },
+                ),
+                _SliderSetting(
+                  title: "Refresh every N pages".tl,
+                  settingsIndex: "einkRefreshInterval",
+                  interval: 1,
+                  min: 1,
+                  max: 10,
+                ),
+                _SliderSetting(
+                  title: "Refresh duration (ms)".tl,
+                  settingsIndex: "einkRefreshDuration",
+                  interval: 50,
+                  min: 50,
+                  max: 1000,
+                ),
+              ],
+              if (EinkPanel.rippleSupported) ...[
+                _SwitchSetting(
+                  title: "Ripple page turn".tl,
+                  subtitle:
+                      "Use the system ripple effect when turning pages by tap or key in gallery modes. Replaces the page animation"
+                          .tl,
+                  settingKey: "einkRipplePageTurn",
+                  onChanged: () => setState(() {}),
+                ),
+                if (appdata.settings['einkRipplePageTurn'] == true)
+                  SelectSetting(
+                    title: "Ripple speed".tl,
+                    settingKey: "einkRippleSpeed",
+                    optionTranslation: {
+                      "slower": "Slower".tl,
+                      "standard": "Standard".tl,
+                      "faster": "Faster".tl,
+                    },
+                  ),
+              ],
             ],
           ).toSliver(),
         ],
@@ -1098,13 +1278,7 @@ class _ReaderSettingsState extends State<ReaderSettings> {
               SelectSetting(
                 title: "Source language".tl,
                 settingKey: "imageTranslationSource",
-                optionTranslation: {
-                  "auto": "Auto detect".tl,
-                  "ja": "Japanese".tl,
-                  "en": "English".tl,
-                  "ko": "Korean".tl,
-                  "zh": "Chinese".tl,
-                },
+                optionTranslation: _sourceLanguageOptions(),
                 onChanged: () {
                   setState(() {});
                   widget.onChanged?.call("imageTranslationSource");
@@ -1118,17 +1292,7 @@ class _ReaderSettingsState extends State<ReaderSettings> {
               SelectSetting(
                 title: "Target language".tl,
                 settingKey: "imageTranslationTarget",
-                optionTranslation: {
-                  "zh": "Simplified Chinese".tl,
-                  "zh-TW": "Traditional Chinese".tl,
-                  "en": "English".tl,
-                  "ja": "Japanese".tl,
-                  "ko": "Korean".tl,
-                  "fr": "French".tl,
-                  "de": "German".tl,
-                  "es": "Spanish".tl,
-                  "ru": "Russian".tl,
-                },
+                optionTranslation: _targetLanguageOptions(),
                 onChanged: () {
                   setState(() {});
                   widget.onChanged?.call("imageTranslationTarget");
@@ -1138,6 +1302,20 @@ class _ReaderSettingsState extends State<ReaderSettings> {
                     ? widget.comicSource
                     : null,
                 useDeviceSettings: useDeviceSpecificSettings,
+              ),
+              _CallbackSetting(
+                title: "Custom languages".tl,
+                subtitle: _customLanguageCount() == 0
+                    ? "Add source or target languages that are not in the list"
+                          .tl
+                    : "@count added".tlParams({
+                        'count': _customLanguageCount(),
+                      }),
+                actionTitle: "Manage".tl,
+                callback: () async {
+                  await context.to(() => const TranslationLanguagesPage());
+                  if (mounted) setState(() {});
+                },
               ),
               SelectSetting(
                 title: "Performance mode".tl,

@@ -2,6 +2,7 @@ library;
 
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
@@ -17,14 +18,18 @@ import 'package:venera/components/custom_slider.dart';
 import 'package:venera/components/rich_comment_content.dart';
 import 'package:venera/components/window_frame.dart';
 import 'package:venera/foundation/app.dart';
+import 'package:venera/foundation/app_page_route.dart';
 import 'package:venera/foundation/appdata.dart';
+import 'package:venera/foundation/auto_page_turning.dart';
 import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/chapter_duplicates.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_state_repository.dart';
 import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/consts.dart';
+import 'package:venera/foundation/eink_screen.dart';
 import 'package:venera/foundation/favorites.dart';
+import 'package:venera/foundation/gallery_layout.dart';
 import 'package:venera/foundation/global_state.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/image_enhance_shader.dart';
@@ -38,8 +43,11 @@ import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/read_later.dart';
 import 'package:venera/foundation/reading_statistics.dart';
 import 'package:venera/foundation/res.dart';
+import 'package:venera/foundation/shortcuts.dart';
+import 'package:venera/foundation/wide_page_split.dart';
 import 'package:venera/network/download.dart';
 import 'package:venera/network/images.dart';
+import 'package:venera/pages/reader/auto_scroll_activity.dart';
 import 'package:venera/pages/reader/continuous_page_turn_coordinator.dart';
 import 'package:venera/pages/reader/shader_image.dart';
 import 'package:venera/pages/settings/settings_page.dart';
@@ -111,6 +119,19 @@ List<DeviceOrientation> resolveReadingOrientations(bool? rotation) =>
       _ => const <DeviceOrientation>[],
     };
 
+/// How the page content moves when a gallery turns [forward]; null outside
+/// gallery modes.
+@visibleForTesting
+RippleSweep? galleryRippleSweep(ReaderMode mode, {required bool forward}) {
+  final sweep = switch (mode) {
+    ReaderMode.galleryLeftToRight => RippleSweep.leftward,
+    ReaderMode.galleryRightToLeft => RippleSweep.rightward,
+    ReaderMode.galleryTopToBottom => RippleSweep.upward,
+    _ => null,
+  };
+  return forward ? sweep : sweep?.opposite;
+}
+
 extension _ReaderContext on BuildContext {
   _ReaderState get reader => findAncestorStateOfType<_ReaderState>()!;
 
@@ -166,6 +187,7 @@ class _ReaderState extends State<Reader>
         _ReaderWindow,
         _VolumeListener,
         _ImagePerPageHandler,
+        _AutoPageTurner,
         WidgetsBindingObserver,
         RouteAware {
   dynamic effectiveSetting(String key) =>
@@ -190,9 +212,7 @@ class _ReaderState extends State<Reader>
   @override
   int get maxPage {
     if (images == null) return 1;
-    return !showSingleImageOnFirstPage()
-        ? (images!.length / imagesPerPage).ceil()
-        : 1 + ((images!.length - 1) / imagesPerPage).ceil();
+    return galleryLayout.screenCount;
   }
 
   /// Total pages including chapter comments page (used for internal page control).
@@ -256,9 +276,32 @@ class _ReaderState extends State<Reader>
 
   var focusNode = FocusNode();
 
+  /// Lives here rather than in the gallery so the refresh interval keeps
+  /// counting across chapters, which remount the gallery.
+  final _einkRefresher = EinkRefresher();
+
+  @override
+  bool get _flashesNextTurn => _einkRefresher.flashesNextTurn;
+
+  /// Last (chapter, page) a gallery came to rest on.
+  (int, int)? _settledPosition;
+
+  /// Counts a turn only when the resting position actually changed: a remount
+  /// on the same page or a bounce back at a chapter edge is not a turn.
+  void _onGallerySettled(int settledPage) {
+    final position = (chapter, settledPage);
+    final previous = _settledPosition;
+    _settledPosition = position;
+    if (previous != null && previous != position) {
+      _einkRefresher.onPageSettled();
+    }
+  }
+
   final ReadingTimeTracker _readingTimeTracker = ReadingTimeTracker();
   Timer? _readingCheckpointTimer;
+  @override
   PageRoute<dynamic>? _readingRoute;
+  @override
   bool _readerRouteVisible = false;
   bool _appIsForeground = true;
   bool _readingStatisticsChanged = false;
@@ -358,6 +401,7 @@ class _ReaderState extends State<Reader>
       App.rootRouteObserver.subscribe(this, route);
       _readerRouteVisible = route.isCurrent;
       _syncReadingTimer();
+      _syncAutoTurn();
     }
     if (!_isInitialized) {
       initImagesPerPage(widget.initialPage ?? 1);
@@ -394,15 +438,13 @@ class _ReaderState extends State<Reader>
     _stopReadingTimer();
     App.rootRouteObserver.unsubscribe(this);
     WidgetsBinding.instance.removeObserver(this);
-    if (isFullscreen) {
-      fullscreen();
-    }
     if (_updateHistoryTimer != null && history != null) {
       _updateHistoryTimer!.cancel();
       _updateHistoryTimer = null;
       unawaited(HistoryManager().addHistoryAsync(history!));
     }
-    autoPageTurningTimer?.cancel();
+    _disposeAutoPageTurning();
+    _einkRefresher.dispose();
     focusNode.dispose();
     ImageTranslationService.instance.removeListener(_onPageTranslated);
     ImageTranslationService.instance.clearQueue();
@@ -425,30 +467,40 @@ class _ReaderState extends State<Reader>
       _stopReadingTimer();
       _notifyReadingStatisticsChanged();
     }
+    // Inactive is still on screen: an unfocused desktop window, or a phone
+    // with the notification shade pulled down.
+    _appVisible =
+        state == AppLifecycleState.resumed ||
+        state == AppLifecycleState.inactive;
+    _syncAutoTurn();
   }
 
   @override
   void didPush() {
     _readerRouteVisible = true;
     _syncReadingTimer();
+    _syncAutoTurn();
   }
 
   @override
   void didPopNext() {
     _readerRouteVisible = true;
     _syncReadingTimer();
+    _syncAutoTurn();
   }
 
   @override
   void didPushNext() {
     _readerRouteVisible = false;
     _stopReadingTimer();
+    _syncAutoTurn();
   }
 
   @override
   void didPop() {
     _readerRouteVisible = false;
     _stopReadingTimer();
+    _syncAutoTurn();
   }
 
   void _syncReadingTimer() {
@@ -521,10 +573,63 @@ class _ReaderState extends State<Reader>
   }
 
   void onKeyEvent(KeyEvent event) {
-    if (event.logicalKey == LogicalKeyboardKey.f12 && event is KeyUpEvent) {
-      fullscreen();
+    if (event is! KeyUpEvent) {
+      final action = AppShortcuts.match(event, const {
+        ShortcutScope.app,
+        ShortcutScope.reader,
+      });
+      // App-scope actions run from the root handler; either way the key is
+      // taken, so the built-in arrow keys never act on it as well.
+      if (action != null) {
+        if (action.scope == ShortcutScope.reader) {
+          _runShortcut(action, event is KeyRepeatEvent);
+        }
+        return;
+      }
     }
     _imageViewController?.handleKeyEvent(event);
+  }
+
+  _ReaderScaffoldState? _scaffoldState;
+
+  DateTime _lastShortcutTurn = DateTime.fromMillisecondsSinceEpoch(0);
+
+  void _runShortcut(ShortcutAction action, bool isRepeat) {
+    final turnsPage =
+        action == ShortcutAction.nextPage || action == ShortcutAction.prevPage;
+    // Held keys turn pages at the arrow keys' pace; other actions fire once.
+    if (isRepeat) {
+      if (!turnsPage) return;
+      final gap = enablePageAnimation(cid, type)
+          ? const Duration(milliseconds: 200)
+          : const Duration(milliseconds: 50);
+      if (DateTime.now().difference(_lastShortcutTurn) < gap) return;
+    }
+    if (turnsPage) _lastShortcutTurn = DateTime.now();
+    final scaffold = _scaffoldState;
+    switch (action) {
+      // Same as the volume keys: past the last page, on to the next chapter.
+      // A held key stops at the chapter end instead of racing through them.
+      case ShortcutAction.nextPage:
+        isRepeat ? toNextPage() : onDown();
+      case ShortcutAction.prevPage:
+        isRepeat ? toPrevPage() : onUp();
+      case ShortcutAction.nextChapter:
+        toNextChapter();
+      case ShortcutAction.prevChapter:
+        toPrevChapter();
+      case ShortcutAction.toggleReaderMenu:
+        if (scaffold?.mounted == true) scaffold!.openOrClose();
+      case ShortcutAction.toggleAutoPageTurning:
+        if (scaffold?.mounted == true) scaffold!.toggleAutoPageTurning();
+      case ShortcutAction.toggleNightMode:
+        if (scaffold?.mounted == true) scaffold!.toggleNightMode();
+      case ShortcutAction.collectImage:
+        if (scaffold?.mounted == true) scaffold!.addImageFavorite();
+      case ShortcutAction.toggleFullscreen:
+      case ShortcutAction.toggleWindow:
+        break;
+    }
   }
 
   @override
@@ -577,6 +682,8 @@ class _ReaderState extends State<Reader>
   @override
   void onPageChanged() {
     updateHistory();
+    // Any turn, manual or automatic, gives the new page a full interval.
+    _restartAutoTurnCountdown();
   }
 
   /// Prevent multiple history updates in a short time.
@@ -591,15 +698,7 @@ class _ReaderState extends State<Reader>
         history!.page = images?.length ?? 1;
       } else {
         /// Record the first image of the page
-        if (!showSingleImageOnFirstPage() || imagesPerPage == 1) {
-          history!.page = (page - 1) * imagesPerPage + 1;
-        } else {
-          if (page == 1) {
-            history!.page = 1;
-          } else {
-            history!.page = (page - 2) * imagesPerPage + 2;
-          }
-        }
+        history!.page = galleryLayout.imagesOf(page).$1 + 1;
       }
       history!.maxPage = images?.length ?? 1;
       if (widget.chapters?.isGrouped ?? false) {
@@ -754,12 +853,73 @@ abstract mixin class _ImagePerPageHandler {
     }
   }
 
+  /// Landscape images of the current chapter seen so far (0-based). Only
+  /// known once decoded, so the grouping is refined while reading.
+  final _wideImages = <int>{};
+
+  GalleryLayout? _layout;
+
+  List<String>? _layoutImages;
+
+  /// Landscape images belong to one chapter's image list.
+  void _syncLayoutChapter() {
+    if (!identical(_layoutImages, images)) {
+      _layoutImages = images;
+      _wideImages.clear();
+      _layout = null;
+    }
+  }
+
+  /// How the current chapter's images are grouped into pages.
+  GalleryLayout get galleryLayout => _layout = _layoutFor(imagesPerPage);
+
+  /// The 0-based [start, end) images on the page being read; empty on the
+  /// chapter comments page.
+  (int, int) get pageImageRange => galleryLayout.imagesOf(page);
+
+  /// The grouping in use if it is for [perScreen], else a fresh one from the
+  /// landscape images known so far, with no page held in place.
+  GalleryLayout _layoutFor(int perScreen) {
+    _syncLayoutChapter();
+    final singleFirst = showSingleImageOnFirstPage();
+    final cached = _layout;
+    if (cached != null &&
+        cached.imagesPerScreen == perScreen &&
+        cached.singleFirst == singleFirst) {
+      return cached;
+    }
+    return GalleryLayout(
+      imageCount: images?.length ?? 0,
+      imagesPerScreen: perScreen,
+      singleFirst: singleFirst,
+      wide: _wideImages,
+    );
+  }
+
+  /// Records image [index] as landscape. True if that is new and pages hold
+  /// several images, i.e. the pages may need regrouping.
+  bool noteWideImage(int index) {
+    _syncLayoutChapter();
+    if (index < 0 || index >= (images?.length ?? 0)) return false;
+    return _wideImages.add(index) && imagesPerPage > 1;
+  }
+
+  /// Regroups pages with the landscape images found so far, keeping the page
+  /// being read in place. Returns its page number afterwards, or null when
+  /// the grouping did not change.
+  int? regroupGallery() {
+    final before = galleryLayout;
+    final after = before.regroupedAround(page, _wideImages);
+    if (after.sameScreensAs(before)) return null;
+    _layout = after;
+    if (page > before.screenCount) return after.screenCount + 1;
+    return after.screenOf(before.imagesOf(page).$1);
+  }
+
   /// Calculate maxPage with a specific imagesPerPage value
   int _calcMaxPage(int imagesPerPageValue) {
     if (images == null) return 1;
-    return !showSingleImageOnFirstPage()
-        ? (images!.length / imagesPerPageValue).ceil()
-        : 1 + ((images!.length - 1) / imagesPerPageValue).ceil();
+    return _layoutFor(imagesPerPageValue).screenCount;
   }
 
   /// Check if the number of images per page has changed
@@ -788,26 +948,33 @@ abstract mixin class _ImagePerPageHandler {
     int oldImagesPerPage,
     int newImagesPerPage,
   ) {
-    int previousImageIndex = 1;
-    if (!showSingleImageOnFirstPage() || oldImagesPerPage == 1) {
-      previousImageIndex = (page - 1) * oldImagesPerPage + 1;
-    } else {
-      if (page == 1) {
-        previousImageIndex = 1;
-      } else {
-        previousImageIndex = (page - 2) * oldImagesPerPage + 2;
-      }
-    }
-
     int newPage;
-    if (newImagesPerPage != 1) {
-      if (showSingleImageOnFirstPage()) {
-        newPage = ((previousImageIndex - 1) / newImagesPerPage).ceil() + 1;
-      } else {
-        newPage = (previousImageIndex / newImagesPerPage).ceil();
-      }
+    final imgs = images;
+    if (imgs != null && imgs.isNotEmpty) {
+      // The page that shows the image the old page started with.
+      final before = _layoutFor(oldImagesPerPage);
+      final first = before.imagesOf(page.clamp(1, before.screenCount)).$1;
+      newPage = galleryLayout.screenOf(first);
     } else {
-      newPage = previousImageIndex;
+      int previousImageIndex = 1;
+      if (!showSingleImageOnFirstPage() || oldImagesPerPage == 1) {
+        previousImageIndex = (page - 1) * oldImagesPerPage + 1;
+      } else {
+        if (page == 1) {
+          previousImageIndex = 1;
+        } else {
+          previousImageIndex = (page - 2) * oldImagesPerPage + 2;
+        }
+      }
+      if (newImagesPerPage != 1) {
+        if (showSingleImageOnFirstPage()) {
+          newPage = ((previousImageIndex - 1) / newImagesPerPage).ceil() + 1;
+        } else {
+          newPage = (previousImageIndex / newImagesPerPage).ceil();
+        }
+      } else {
+        newPage = previousImageIndex;
+      }
     }
 
     // Clamp to valid range (1 to maxPage)
@@ -960,12 +1127,62 @@ abstract mixin class _ReaderLocation {
 
   int _animationCount = 0;
 
+  ReaderMode get mode;
+
+  bool get mounted;
+
+  /// Whether the next settled turn will be covered by an e-ink refresh.
+  bool get _flashesNextTurn;
+
+  /// Ripple turns are on and the panel supports them in this mode.
+  bool get _rippleActive =>
+      mode.isGallery &&
+      appdata.settings['einkRipplePageTurn'] == true &&
+      EinkPanel.rippleSupported;
+
+  /// Sweep for a ripple turn to [page], or null for a plain turn: no real
+  /// change of page, or a full refresh about to cover the turn anyway.
+  RippleSweep? _rippleSweepTo(int page) {
+    if (!_rippleActive || page == this.page || _flashesNextTurn) return null;
+    return galleryRippleSweep(mode, forward: page > this.page);
+  }
+
+  bool _rippleTurnPending = false;
+
+  /// Arms the ripple before anything repaints, then jumps: the panel animates
+  /// the change itself, so the slide animation stays off.
+  Future<void> _turnWithRipple(int page, RippleSweep sweep) async {
+    _rippleTurnPending = true;
+    final view = _imageViewController;
+    try {
+      await EinkPanel.queueRipple(sweep);
+    } finally {
+      _rippleTurnPending = false;
+    }
+    // The reader closed, or a remount replaced the gallery, while waiting.
+    if (!mounted || view == null || !identical(view, _imageViewController)) {
+      return;
+    }
+    this.page = page;
+    update();
+    view.toPage(page);
+  }
+
   bool toPage(int page) {
     if (_validatePage(page)) {
       if (page == this.page && page != 1 && page != totalPages) {
         return false;
       }
-      final hasAnimation = enablePageAnimation(cid, type);
+      // Dropped while a ripple turn waits for its command. Reporting it as
+      // handled keeps callers from switching chapter instead.
+      if (_rippleTurnPending) return true;
+      final sweep = _rippleSweepTo(page);
+      if (sweep != null) {
+        unawaited(_turnWithRipple(page, sweep));
+        return true;
+      }
+      // The ripple stands in for the slide, also on the turns it skips.
+      final hasAnimation = enablePageAnimation(cid, type) && !_rippleActive;
       if (hasAnimation) {
         _pendingPage = page;
         _animationCount++;
@@ -1027,7 +1244,6 @@ abstract mixin class _ReaderLocation {
       // handles the jump we're done. Otherwise fall through to the remount path.
       if (_imageViewController?.jumpToChapter(c, toLastPage: toLastPage) ==
           true) {
-        _hideBarsAfterChapterChange();
         return true;
       }
       chapter = c;
@@ -1035,86 +1251,238 @@ abstract mixin class _ReaderLocation {
       _jumpToLastPageOnLoad = toLastPage;
       chapterJumpNonce++;
       update();
-      _hideBarsAfterChapterChange();
       return true;
     }
     return false;
   }
+}
 
-  /// After switching chapters, collapse the reader chrome so the new chapter
-  /// starts immersive (user can tap to show bars again).
-  void _hideBarsAfterChapterChange() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!locationMounted) return;
-      try {
-        final scaffold = findReaderScaffold();
-        if (scaffold != null && scaffold.isOpen) {
-          scaffold.openOrClose();
-        }
-      } catch (_) {}
-    });
+/// Auto turning: turns a page every interval, or in continuous modes set to
+/// scroll, scrolls the list at a steady speed (driven by the view). Pauses
+/// while the menu is open, the reader is covered or the app is hidden.
+/// Also owns keeping the screen awake, for auto turning and for the
+/// `readerKeepScreenOn` setting.
+abstract mixin class _AutoPageTurner {
+  String get cid;
   }
 
   Timer? autoPageTurningTimer;
 
-  void autoPageTurning(String cid, ComicType type) {
-    if (autoPageTurningTimer != null) {
-      autoPageTurningTimer!.cancel();
-      autoPageTurningTimer = null;
-    } else {
-      int interval = appdata.settings.getReaderSetting(
+  ComicType get type;
+
+  ReaderMode get mode;
+
+  bool get isLoading;
+
+  List<String>? get images;
+
+  bool get mounted;
+
+  BuildContext get context;
+
+  bool get _readerRouteVisible;
+
+  PageRoute<dynamic>? get _readingRoute;
+
+  _ImageViewController? get _imageViewController;
+
+  bool toNextPage();
+
+  bool toNextChapter();
+
+  void update();
+
+  /// The user's switch; stays on while paused.
+  bool autoPageTurning = false;
+
+  bool _readerMenuOpen = false;
+
+  bool _appVisible = true;
+
+  /// Set while the reader waits for a tap of its own, e.g. picking which
+  /// image of a page to save.
+  bool _autoTurnHeld = false;
+
+  Timer? _autoTurnTimer;
+
+  /// Readers currently wanting the screen on. Shared, as the platform flag
+  /// is: a reader opened over another must not switch it off for both.
+  static final _screenOnHolders = <Object>{};
+
+  static const _screenChannel = MethodChannel("venera/method_channel");
+
+  bool get _autoTurnActive =>
+      autoPageTurning && !_readerMenuOpen && _readerRouteVisible && _appVisible;
+
+  bool get _autoTurnScrolls => autoTurnScrolls(
+    mode.key,
+    appdata.settings.getReaderSetting(
+      cid,
+      type.sourceKey,
+      'autoPageTurningMode',
+    ),
+  );
+
+  /// Whether the continuous view should be scrolling right now.
+  bool get autoScrollRunning => _autoTurnActive && _autoTurnScrolls;
+
+  /// A popup over the reader (context menu, drawer, dialog). Those never
+  /// reach the route observer, so turning is skipped while one is up rather
+  /// than paused, and carries on once it closes.
+  bool get _autoTurnInterrupted =>
+      _autoTurnHeld || !(_readingRoute?.isCurrent ?? true);
+
+  void toggleAutoPageTurning() {
+    autoPageTurning = !autoPageTurning;
+    _syncAutoTurn(restartCountdown: true);
+  }
+
+  void stopAutoPageTurning({String? message}) {
+    if (!autoPageTurning) return;
+    autoPageTurning = false;
+    _syncAutoTurn();
+    if (message != null && mounted) {
+      context.showMessage(message: message);
+    }
+    update();
+  }
+
+  void _onMenuToggled(bool open) {
+    _readerMenuOpen = open;
+    // Closing the menu gives the page a fresh interval.
+    _syncAutoTurn(restartCountdown: true);
+  }
+
+  /// Brings the countdown, the view's scrolling and the screen lock in line
+  /// with the current state. Called on every change that can affect them.
+  void _syncAutoTurn({bool restartCountdown = false}) {
+    if (!_autoTurnActive || _autoTurnScrolls) {
+      _autoTurnTimer?.cancel();
+      _autoTurnTimer = null;
+    } else if (_autoTurnTimer == null || restartCountdown) {
+      _armAutoTurn();
+    }
+    _imageViewController?.syncAutoScroll();
+    _syncScreenOn();
+  }
+
+  /// On while the reader is visible and auto turning, or always while
+  /// reading when the user asked for it.
+  void _syncScreenOn() {
+    _keepScreenOn(
+      _readerRouteVisible &&
+          (autoPageTurning ||
+              appdata.settings.getReaderSetting(
+                    cid,
+                    type.sourceKey,
+                    'readerKeepScreenOn',
+                  ) ==
+                  true),
+    );
+  }
+
+  void _armAutoTurn() {
+    _autoTurnTimer?.cancel();
+    final interval = autoTurnIntervalOf(
+      appdata.settings.getReaderSetting(
         cid,
         type.sourceKey,
         'autoPageTurningInterval',
-      );
-      autoPageTurningTimer = Timer.periodic(Duration(seconds: interval), (_) {
-        // Advance a page; at the end of a chapter continue into the next one
-        // (mirrors the manual tap-to-advance behaviour). Only stop when there
-        // is no next page AND no next chapter.
-        if (!toNextPage()) {
-          if (!toNextChapter()) {
-            autoPageTurningTimer?.cancel();
-            autoPageTurningTimer = null;
-          }
-        }
-      });
+      ),
+    );
+    _autoTurnTimer = Timer(Duration(seconds: interval), _onAutoTurnTick);
+  }
+
+  void _restartAutoTurnCountdown() {
+    if (_autoTurnTimer != null) _armAutoTurn();
+  }
+
+  void _onAutoTurnTick() {
+    _autoTurnTimer = null;
+    if (!mounted || !_autoTurnActive || _autoTurnScrolls) return;
+    // A chapter still loading re-arms once its images arrive.
+    if (isLoading) return;
+    if (_autoTurnInterrupted) {
+      _armAutoTurn();
+      return;
     }
+    if (images == null) {
+      stopAutoPageTurning(message: "Auto page turning stopped".tl);
+      return;
+    }
+    if (toNextPage() || toNextChapter()) {
+      _armAutoTurn();
+    } else {
+      stopAutoPageTurning(
+        message: "Reached the end. Auto page turning stopped".tl,
+      );
+    }
+  }
+
+  /// A chapter opened during auto turning starts its countdown only once
+  /// its pages can actually be shown.
+  void _onChapterImagesLoaded() => _syncAutoTurn(restartCountdown: true);
+
+  void _onChapterLoadFailed() {
+    stopAutoPageTurning(message: "Auto page turning stopped".tl);
+  }
+
+  void _disposeAutoPageTurning() {
+    _autoTurnTimer?.cancel();
+    _autoTurnTimer = null;
+    _keepScreenOn(false);
+  }
+
+  void _keepScreenOn(bool on) {
+    if (!(App.isAndroid || App.isIOS)) return;
+    final wasOn = _screenOnHolders.isNotEmpty;
+    if (on) {
+      _screenOnHolders.add(this);
+    } else {
+      _screenOnHolders.remove(this);
+    }
+    final isOn = _screenOnHolders.isNotEmpty;
+    if (wasOn == isOn) return;
+    // The two native handlers read their argument differently.
+    _screenChannel
+        .invokeMethod('setScreenOn', App.isAndroid ? {'set': isOn} : isOn)
+        .catchError((e) {
+          Log.error("Reader", "Failed to keep the screen on: $e");
+        });
   }
 }
 
 mixin class _ReaderWindow {
-  bool isFullscreen = false;
-
   late WindowFrameController windowFrame;
 
   bool _isInit = false;
+
+  bool _windowDisposed = false;
+
+  /// Whether the window was already fullscreen when reading began; null until
+  /// known. Leaving the reader restores that state, so fullscreen entered
+  /// while reading (auto or by shortcut) ends with it, and one the user set
+  /// beforehand stays.
+  bool? _fullscreenBeforeReading;
 
   void initReaderWindow() {
     if (!App.isDesktop || _isInit) return;
     windowFrame = WindowFrame.of(App.rootContext);
     windowFrame.addCloseListener(onWindowClose);
     _isInit = true;
-    if (appdata.settings['autoFullscreenOnRead'] == true) {
-      _autoFullscreen();
+    _initFullscreen();
+  }
+
+  Future<void> _initFullscreen() async {
+    final wasFullscreen = await windowManager.isFullScreen();
+    if (_windowDisposed) return;
+    _fullscreenBeforeReading = wasFullscreen;
+    if (!wasFullscreen && appdata.settings['autoFullscreenOnRead'] == true) {
+      WindowFullscreen.set(true);
     }
   }
 
-  /// Enter fullscreen as the reader opens. A window the user already put
-  /// in fullscreen is left alone: [fullscreen] toggles, and toggling here would
-  /// make leaving the reader drop them out of their own fullscreen.
-  void _autoFullscreen() async {
-    if (await windowManager.isFullScreen()) return;
-    fullscreen();
-  }
-
-  void fullscreen() async {
-    if (!App.isDesktop) return;
-    await windowManager.hide();
-    await windowManager.setFullScreen(!isFullscreen);
-    await windowManager.show();
-    isFullscreen = !isFullscreen;
-    WindowFrame.of(App.rootContext).setWindowFrame(!isFullscreen);
-  }
+  void fullscreen() => WindowFullscreen.toggle();
 
   bool onWindowClose() {
     if (Navigator.of(App.rootContext).canPop()) {
@@ -1126,8 +1494,12 @@ mixin class _ReaderWindow {
   }
 
   void disposeReaderWindow() {
-    if (!App.isDesktop) return;
+    if (!_isInit) return;
+    _windowDisposed = true;
     windowFrame.removeCloseListener(onWindowClose);
+    if (_fullscreenBeforeReading == false) {
+      WindowFullscreen.set(false);
+    }
   }
 }
 
@@ -1176,6 +1548,9 @@ abstract interface class _ImageViewController {
   /// itself here. Returns false to let keyed modes fall back to the remount path.
   bool jumpToChapter(int chapter, {bool toLastPage = false});
 
+  /// Starts or stops scrolling to match [_AutoPageTurner.autoScrollRunning].
+  void syncAutoScroll();
+
   void handleDoubleTap(Offset location);
 
   void handleLongPressDown(Offset location);
@@ -1189,7 +1564,8 @@ abstract interface class _ImageViewController {
 
   /// Whether the current page's image is zoomed in (scale above the fit
   /// scale). While zoomed, a single-finger drag pans the image, so the
-  /// swipe-to-favorite gesture must stand down to avoid false triggers (#143).
+  /// swipe-to-favorite gesture (#143) and the iOS back swipe (#310) must
+  /// stand down to avoid false triggers.
   bool get isImageZoomed;
 
   Future<Uint8List?> getImageByOffset(Offset offset);

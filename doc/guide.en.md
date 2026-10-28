@@ -6,6 +6,8 @@ This document covers the setup steps and controls for each feature. If a setting
 
 - [AI Translation](#ai-translation)
   - [Setup](#setup)
+  - [Target languages](#target-languages)
+  - [Source languages and recognition models](#source-languages-and-recognition-models)
   - [Custom translation scripts](#custom-translation-scripts)
   - [Enabling](#enabling)
   - [Controls while reading](#controls-while-reading)
@@ -18,6 +20,8 @@ This document covers the setup steps and controls for each feature. If a setting
   - [Chapter layout](#chapter-layout)
   - [Editing](#editing)
   - [Limitations](#limitations)
+- [Auto page turning](#auto-page-turning)
+- [E-ink screens](#e-ink-screens)
 - [Non-obvious controls](#non-obvious-controls)
 
 <!--anchor:ai-translation-->
@@ -39,11 +43,74 @@ Detection and recognition run on the device; the recognized text is sent to an A
 | Language | Size |
 | --- | --- |
 | Japanese (incl. vertical text) | ~460 MB |
-| Chinese / Latin | ~11 MB |
+| Chinese (Simplified + Traditional) | ~17 MB |
+| Chinese / Latin (Simplified only) | ~11 MB |
 | English | ~9 MB |
 | Korean | ~8 MB |
 
 With "Source language" set to "Auto detect", the detector plus any one recognition model is sufficient; the app determines each comic's language itself.
+
+<!--anchor:translation-target-->
+### Target languages
+
+"Target language" includes Simplified Chinese, Traditional Chinese, English, Japanese, Korean, French, German, Spanish, Russian and Vietnamese. You can add a language that is not listed:
+
+1. Settings → AI Translation → "Custom languages" → "+" next to "Target languages".
+2. "Language name": the AI model translates into this name. Write it in that language, such as `ไทย` or `Bahasa Indonesia`.
+3. "Language code": sent to Google Translate and translation scripts, such as `th`, `id` or `pt-BR`. Use a code your service supports.
+4. Save, then select it under "Target language".
+
+- Translated pages are stored by language code, so a code cannot be changed after it is added. The name can be changed at any time.
+- Removing a custom language does not delete pages already translated into it; adding the same code again brings them back.
+- Built-in languages cannot be removed or changed. The custom list travels with your backups across devices.
+- Source languages are extended in the next section.
+- Translations are laid out left to right, so right-to-left languages such as Arabic or Hebrew may not display correctly.
+
+<!--anchor:translation-source-->
+### Source languages and recognition models
+
+Built-in source languages and the recognition model each uses:
+
+| Source language | Recognition model |
+| --- | --- |
+| Japanese | Japanese model (~460 MB), horizontal and vertical text |
+| Simplified Chinese | Chinese (Simplified + Traditional) model; the Chinese / Latin model if that is not downloaded |
+| Traditional Chinese | Chinese (Simplified + Traditional) model (~17 MB), required |
+| English | English model |
+| Korean | Korean model |
+
+- The Chinese / Latin model (~11 MB) only covers common Simplified characters and lacks about 3,800 Traditional ones, so Traditional comics come out with wrong characters. The Chinese (Simplified + Traditional) model covers about 18,000 characters, reads both scripts and also vertical Chinese; once downloaded, Simplified Chinese uses it too.
+- "Auto detect" tells Simplified and Traditional apart, so a Traditional comic is translated into Simplified Chinese as usual.
+- For a Traditional comic, choose "Traditional Chinese" as the source language. Under "Auto detect", vertical Chinese may be read by the Japanese model as Japanese; choosing the language avoids that.
+- Traditional pages opened before this update may have been recorded as having no text to translate. Long-press "Pre-translate" on the details page → "Retranslate" to translate them again.
+
+**Model size and accuracy**
+
+A larger model knows more characters and fonts, so it reads more accurately; the cost is a bigger download, a slower first load, more memory and more heat on phones. A character missing from the dictionary is always read as a look-alike, so dictionary coverage matters more than size. Character error rates measured on a desktop with rendered Traditional dialogue (real comic lettering and screentone are harder):
+
+| Model | Result |
+| --- | --- |
+| Chinese / Latin (~11 MB) | ~17% wrong Traditional characters; vertical text unreadable |
+| Chinese (Simplified + Traditional) (~17 MB) | No errors on Traditional, Simplified or vertical text |
+| PP-OCRv6 small (~21 MB) | Same as above, slightly slower |
+| PP-OCRv6 tiny (~4.5 MB) | About 3x faster, ~18% wrong Traditional characters |
+
+**Adding another source language**
+
+1. Settings → AI Translation → "Custom languages" → "+" next to "Source languages".
+2. Enter a language name and code (such as `fr`, `ru`, `th`).
+3. Enter the recognition model link (.onnx) and character dictionary link (.txt), or use "Fill in a tested model" for Latin script, Cyrillic or Thai.
+4. Saving reads the file sizes; the download starts after you confirm. Models over 100 MB get an extra warning.
+
+- Only PP-OCR text recognition models (CTC) in ONNX format work, together with the character dictionary they were trained with. Paddle, MNN or PyTorch files and encoder-decoder models such as manga-ocr do not.
+- "Input height": 48 for PP-OCRv3 and later, 32 for older models.
+- After download the model is run once; if it cannot run, is not a recognition model, or its class count does not match the dictionary, the files are deleted and the reason is shown.
+- Custom source languages must be selected under "Source language"; "Auto detect" only chooses among the built-in languages.
+- The language list travels with your backups; model files do not, so each device downloads its own.
+
+**Custom text detection model**
+
+"Text detection model" on the same page can be replaced with your own, shared by all languages. Only PP-OCR text detection models (DBNet) in ONNX format work; tested choices are PP-OCRv5 mobile (~4.8 MB) and PP-OCRv6 small (~9.9 MB). A larger detector finds small or stylized lettering more reliably but is slower on every page. The built-in detector is used until the download finishes.
 
 <!--anchor:translation-script-->
 ### Custom translation scripts
@@ -61,7 +128,7 @@ The function receives an object containing:
 | --- | --- |
 | `texts` | An array of input strings, possibly from one or several pages |
 | `sourceLang` | Source language code, such as `en`, `ja` or `zh`. `auto` means the app has not determined the language yet; your script or service must detect it, or map it to the API's auto-detection parameter |
-| `targetLang` | Target language code, such as `zh`, `zh-TW` or `en`; map language codes as required by your service |
+| `targetLang` | Target language code, such as `zh`, `zh-TW` or `en`, or the code of a custom target language; map language codes as required by your service |
 | `glossary` | This comic's existing glossary as `{source: translation}`. The script must pass it to the service or apply it itself to keep names consistent |
 | `provider` | The provider dialog's `{url, key, model}`, all strings. The app does not append URL paths or add authentication headers for your script |
 
@@ -160,7 +227,7 @@ Most users do not need Advanced settings; changing any performance detail switch
 
 | Placeholder | Replaced with |
 | --- | --- |
-| `$target` | The target language name, e.g. "English" |
+| `$target` | The target language name, e.g. "English"; for a custom target language, the name entered when adding it |
 
 Two things must stay in the prompt or the feature stops working. First, ask the model to output only a JSON object like `{"lines":[{"id":0,"text":"translation"}]}` with each id appearing exactly once — the app uses those ids to put each translation back in its own bubble, and a reply it cannot parse fails the page. Second, if you want names to stay consistent, tell the model to reuse the renderings given in the `glossary` field and to return newly seen proper nouns in a `names` field. Clearing the field and saving restores the built-in prompt. The setting travels with your backups across devices.
 
@@ -243,6 +310,45 @@ On a collection's detail page using "Chapter tabs", long-press a tab (right-clic
 - A member shown in red as "Unavailable" has an uninstalled source or missing local files; remove it or restore the source.
 - A collection's update time is the newest among its members.
 - Collection settings and custom covers are included in backup and sync.
+
+<!--anchor:auto-page-turning-->
+## Auto page turning
+
+Open the menu while reading and tap "Auto Page Turning" in the bottom bar to start it; tap it again to stop.
+
+- **Gallery modes**: turn a page at a fixed interval, 1–20 seconds, 5 by default.
+- **Continuous modes**: "Auto page turning mode" offers "Turn pages" or "Scroll". "Scroll" moves the page at a steady speed, 1–30, 15 by default. The speed is relative to the image width, so a level reads at the same pace on phones, tablets and desktop.
+
+Change the interval, mode and speed in Settings → Reading settings, or under "Settings" in the reader menu. Like other reading settings, they can be set per comic or per device.
+
+While it runs, opening the menu shows an extra row above the bottom bar: adjust the interval or speed there, or tap "Stop". Changes are saved to the settings.
+
+- **Pauses automatically**: while the menu, a popup or another page is open, or while the app is in the background. The countdown starts again when you return.
+- **You take over**: in scroll mode, a touch, drag, mouse wheel or tap turn takes over, and scrolling resumes shortly after you let go.
+- **Waits for loading**: a page that is still loading is waited for, not skipped. In page mode, a manual page turn or a newly loaded chapter restarts the countdown.
+- **Stops at the end**: at the end, or when a chapter fails to load, it stops and shows a notice.
+- **Screen stays on**: the screen stays on while it runs (phones and tablets only).
+
+To keep the screen on without auto page turning, turn on Settings → Reading settings → "Keep screen on while reading". Phones and tablets only, off by default, and it can be set per comic or per device.
+
+<!--anchor:eink-->
+## E-ink screens
+
+Settings → Reading settings → "E-ink screen". These settings stay on this device and are not synced, so a phone does not start flashing on every page turn.
+
+**Full refresh on page turn**: after a page turn settles, a solid color briefly fills the screen so the e-ink panel redraws every pixel and clears the ghost of the previous page. Gallery modes only.
+
+| Option | Effect |
+| --- | --- |
+| Refresh color | White (default), Black, or Black, then white |
+| Refresh every N pages | How often to refresh, 1–10, 1 by default |
+| Refresh duration (ms) | How long each color is shown, 50–1000, 150 by default |
+
+If some ghosting remains, try a longer duration or "Black, then white".
+
+**Ripple page turn**: shown only on iReader devices running SmartOS 4 or later. In gallery modes, tap and key page turns use the device's own ripple effect in place of the slide animation, following the reading direction and screen rotation. Dragging a page with your finger is unchanged. "Ripple speed" offers Slower, Standard or Faster. A page that is due for a full refresh skips the ripple.
+
+Neither feature has had much testing on real devices yet. If the refresh has no effect or the ripple runs the wrong way, please report your device model and system version.
 
 <!--anchor:gestures-->
 ## Non-obvious controls
