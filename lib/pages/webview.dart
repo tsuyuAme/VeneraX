@@ -98,28 +98,38 @@ class _AppWebviewState extends State<AppWebview> {
   Future<bool> _createWebviewEnvironment() async {
     var proxy = appdata.settings['proxy'].toString();
     if (proxy != "system" && proxy != "direct") {
-      var proxyAvailable = await WebViewFeature.isFeatureSupported(
-        WebViewFeature.PROXY_OVERRIDE,
-      );
-      if (proxyAvailable) {
-        ProxyController proxyController = ProxyController.instance();
-        await proxyController.clearProxyOverride();
-        if (!proxy.contains("://")) {
-          proxy = "http://$proxy";
-        }
-        await proxyController.setProxyOverride(
-          settings: ProxySettings(proxyRules: [ProxyRule(url: proxy)]),
-        );
+      // WebViewFeature is not implemented on Windows desktop and throws:
+      // UnimplementedError: createPlatformWebViewFeatureStatic is not implemented.
+      if (!App.isDesktop) {
+        try {
+          var proxyAvailable = await WebViewFeature.isFeatureSupported(
+            WebViewFeature.PROXY_OVERRIDE,
+          );
+          if (proxyAvailable) {
+            ProxyController proxyController = ProxyController.instance();
+            await proxyController.clearProxyOverride();
+            if (!proxy.contains("://")) {
+              proxy = "http://$proxy";
+            }
+            await proxyController.setProxyOverride(
+              settings: ProxySettings(proxyRules: [ProxyRule(url: proxy)]),
+            );
+          }
+        } catch (_) {}
       }
     }
     if (!App.isWindows) {
       return true;
     }
-    AppWebview.webViewEnvironment = await WebViewEnvironment.create(
-      settings: WebViewEnvironmentSettings(
-        userDataFolder: "${App.dataPath}\\webview",
-      ),
-    );
+    try {
+      AppWebview.webViewEnvironment = await WebViewEnvironment.create(
+        settings: WebViewEnvironmentSettings(
+          userDataFolder: "${App.dataPath}\webview",
+        ),
+      );
+    } catch (_) {
+      AppWebview.webViewEnvironment = null;
+    }
     return true;
   }
 

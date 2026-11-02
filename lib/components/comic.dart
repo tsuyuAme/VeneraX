@@ -693,9 +693,7 @@ class ComicTile extends StatelessWidget {
                         updateText: displayInfo.updateTime,
                         statusText: displayInfo.status,
                         progressText: chapterProgress.currentTitle,
-                        pagesText: _showPageCount
-                            ? displayInfo.pagesText
-                            : null,
+                        pagesText: null,
                       ),
                     ),
                   ],
@@ -787,20 +785,6 @@ class ComicTile extends StatelessWidget {
                         if (lines.length > 3) {
                           lines = lines.sublist(0, 3);
                         }
-                        final pageCount = _showPageCount
-                            ? const ComicStateRepository().quickPageCountFor(
-                                comic,
-                              )
-                            : null;
-                        // Prepended after the description was already trimmed to
-                        // its 3 lines, so the count adds a line instead of
-                        // costing one. Sources that already spell the count into
-                        // the description would otherwise say it twice.
-                        if (pageCount != null &&
-                            !lines.any((e) => e.containsNumber(pageCount))) {
-                          lines.insert(0, '${pageCount}P');
-                        }
-
                         if (lines.isEmpty) {
                           return const SizedBox();
                         }
