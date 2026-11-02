@@ -203,9 +203,6 @@ class ComicTile extends StatelessWidget {
 
   /// Whether the tile shows a page count. Never for a collection: its members
   /// each have their own count, so a single number there would be meaningless.
-  bool get _showPageCount =>
-      !_isCollection && appdata.settings['showPageCountOnTile'] == true;
-
   /// Corner marker drawn over the cover of a collection, in both display modes:
   /// the text badge only exists in detailed mode, and a cover marker is what
   /// makes a collection recognisable at a glance either way.
@@ -693,6 +690,7 @@ class ComicTile extends StatelessWidget {
                         updateText: displayInfo.updateTime,
                         statusText: displayInfo.status,
                         progressText: chapterProgress.currentTitle,
+                        // List tiles: never show page count (keep room for tags).
                         pagesText: null,
                       ),
                     ),
