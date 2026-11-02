@@ -118,18 +118,24 @@ class _LocalFavoritesPage extends StatefulWidget {
 }
 
 class _LocalFavoritesPageState extends State<_LocalFavoritesPage>
-    with SelectionMixin<_LocalFavoritesPage, Comic> {
+    with SelectionMixin<_LocalFavoritesPage, Comic>, _LocalFavoritesActions {
+  @override
   late _FavoritesPageState favPage;
 
+  @override
   late List<FavoriteItem> comics;
 
   var filteredComics = <FavoriteItem>[];
 
+  @override
   String? networkSource;
+  @override
   String? networkFolder;
 
+  @override
   var selectedLocalFolders = <String>{};
 
+  @override
   late List<String> added = [];
 
   String keyword = "";
@@ -141,9 +147,38 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage>
   @override
   List<Comic> get selectableItems => visibleComics;
 
+  @override
   bool get isAllFolder => widget.folder == _localAllFolderLabel;
 
+  @override
   LocalFavoritesManager get manager => LocalFavoritesManager();
+
+  /// Shared by every folder: list the comics of subfolders too.
+  late bool includeSubfolders;
+
+  /// Comics come from several folders: "All", or a folder with its
+  /// subfolders. Actions that need one owning folder are hidden then.
+  @override
+  bool get isAggregated =>
+      isAllFolder ||
+      (includeSubfolders && manager.folderTree.hasChildren(widget.folder));
+
+  /// The folders the shown comics come from.
+  @override
+  List<String> get scopeFolders {
+    if (isAllFolder) return manager.folderNames;
+    return [
+      widget.folder,
+      if (includeSubfolders) ...manager.folderTree.descendantsOf(widget.folder),
+    ];
+  }
+
+  void setIncludeSubfolders(bool value) {
+    setState(() => includeSubfolders = value);
+    appdata.implicitData['local_favorites_include_subfolders'] = value;
+    appdata.writeImplicitData();
+    updateComics();
+  }
 
   bool isLoading = false;
 
@@ -164,17 +199,41 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage>
     });
   }
 
+  bool _leavingMissingFolder = false;
+
+  @override
   void updateComics() {
     if (isLoading) return;
-    if (isAllFolder) {
-      var totalComics = manager.totalComics;
-      if (totalComics < _asyncDataFetchLimit) {
-        comics = manager.getAllComics();
+    if (!isAllFolder && !manager.existsFolder(widget.folder)) {
+      // Gone through a sync or a restore. A rename or delete made here moves
+      // the page itself first, so only leave if nothing else did.
+      if (!_leavingMissingFolder) {
+        _leavingMissingFolder = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _leavingMissingFolder = false;
+          if (mounted &&
+              favPage.folder == widget.folder &&
+              !favPage.isNetwork &&
+              !manager.existsFolder(widget.folder)) {
+            favPage.setFolder(false, null);
+          }
+        });
+      }
+      return;
+    }
+    if (isAggregated) {
+      var folders = scopeFolders;
+      var total = 0;
+      for (var f in folders) {
+        total += manager.folderComics(f);
+      }
+      if (total < _asyncDataFetchLimit) {
+        comics = manager.getComicsIn(folders);
         updateFilteredComics();
       } else {
         isLoading = true;
         manager
-            .getAllComicsAsync()
+            .getComicsInAsync(folders)
             .minTime(const Duration(milliseconds: 200))
             .then((value) {
               if (mounted) {
@@ -210,6 +269,7 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage>
     setState(() {});
   }
 
+  @override
   List<FavoriteItem> filterComics(List<FavoriteItem> curComics) {
     return curComics.where((comic) {
       if (sourceFilterSelect.isNotEmpty &&
@@ -496,6 +556,8 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage>
         appdata.implicitData["local_favorites_tag_match_all"] ?? false;
     authorMatchAll =
         appdata.implicitData["local_favorites_author_match_all"] ?? false;
+    includeSubfolders =
+        appdata.implicitData["local_favorites_include_subfolders"] == true;
     favSortType = FavoriteFolderSort.read(appdata.implicitData, widget.folder);
     favPage = context.findAncestorStateOfType<_FavoritesPageState>()!;
     if (!isAllFolder) {
@@ -518,57 +580,6 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage>
     LocalFavoritesManager().removeListener(updateComics);
   }
 
-  Future<bool> downloadComic(FavoriteItem c) async {
-    var source = c.type.comicSource;
-    if (source != null) {
-      bool isDownloaded = LocalManager().isDownloaded(c.id, (c).type);
-      if (isDownloaded) {
-        return false;
-      }
-      if (!await ensureDownloadStorageWritable()) return false;
-      LocalManager().addTask(
-        ImagesDownloadTask(
-          source: source,
-          comicId: c.id,
-          comicTitle: c.title,
-          comicCover: c.cover,
-        ),
-      );
-      return true;
-    }
-    return false;
-  }
-
-  void downloadSelected() async {
-    if (!await ensureDownloadStorageWritable()) return;
-    // Build the tasks first, then enqueue them in one batch so the queue is
-    // persisted a single time instead of once per comic (#17).
-    var tasks = <DownloadTask>[];
-    for (var c in selectedItems.keys) {
-      var fav = c as FavoriteItem;
-      var source = fav.type.comicSource;
-      if (source == null) continue;
-      if (LocalManager().isDownloading(fav.id, fav.type)) continue;
-      if (LocalManager().isDownloaded(fav.id, fav.type)) continue;
-      tasks.add(
-        ImagesDownloadTask(
-          source: source,
-          comicId: fav.id,
-          comicTitle: fav.title,
-          comicCover: fav.cover,
-        ),
-      );
-    }
-    if (tasks.isNotEmpty) {
-      LocalManager().addTasks(tasks);
-      App.rootContext.showMessage(
-        message: "Added @c comics to download queue.".tlParams(
-          {"c": tasks.length},
-        ),
-      );
-    }
-  }
-
   var scrollController = ScrollController();
 
   @override
@@ -588,20 +599,9 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage>
             style: context.width < changePoint
                 ? AppbarStyle.shadow
                 : AppbarStyle.blur,
-            leading: Tooltip(
-              message: "Folders".tl,
-              child: context.width <= _kTwoPanelChangeWidth
-                  ? IconButton(
-                      icon: const Icon(Icons.menu),
-                      color: context.colorScheme.primary,
-                      onPressed: favPage.showFolderSelector,
-                    )
-                  : const SizedBox(),
-            ),
+            leading: favPage.folderButton(context),
             title: GestureDetector(
-              onTap: context.width < _kTwoPanelChangeWidth
-                  ? favPage.showFolderSelector
-                  : null,
+              onTap: favPage.onTitleTap(context),
               child: Text(title),
             ),
             actions: [
@@ -610,7 +610,7 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage>
                 child: IconButton(
                   icon: const Icon(Icons.sort),
                   color: favSortType != LocalSortType.defaultSort
-                      ? context.colorScheme.primaryContainer
+                      ? context.colorScheme.primary
                       : null,
                   onPressed: showSortDialog,
                 ),
@@ -619,14 +619,7 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage>
                 message: "Filter".tl,
                 child: IconButton(
                   icon: const Icon(Icons.filter_alt_outlined),
-                  color:
-                      readFilterSelect != readFilterList[0] ||
-                          downloadFilterSelect != downloadFilterList[0] ||
-                          sourceFilterSelect.isNotEmpty ||
-                          tagFilterSelect.isNotEmpty ||
-                          authorFilterSelect.isNotEmpty
-                      ? context.colorScheme.primaryContainer
-                      : null,
+                  color: hasActiveFilters ? context.colorScheme.primary : null,
                   onPressed: () {
                     showDialog(
                       context: context,
@@ -696,45 +689,8 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage>
                     text: "Auto link comic sources".tl,
                     onClick: _showAutoLinkSourcesDialog,
                   ),
-                  if (!isAllFolder)
-                    MenuEntry(
-                      icon: Icons.edit_outlined,
-                      text: "Rename".tl,
-                      onClick: () {
-                        showInputDialog(
-                          context: App.rootContext,
-                          title: "Rename".tl,
-                          hintText: "New Name".tl,
-                          initialValue: widget.folder,
-                          onConfirm: (value) {
-                            // Pre-filled with the current name: confirming it
-                            // unchanged is a no-op, not a "folder exists" error.
-                            if (value.toString() == widget.folder) {
-                              return null;
-                            }
-                            var err = validateFolderName(value.toString());
-                            if (err != null) {
-                              return err;
-                            }
-                            LocalFavoritesManager().rename(
-                              widget.folder,
-                              value.toString(),
-                            );
-                            if (FavoriteFolderSort.rename(
-                              appdata.implicitData,
-                              widget.folder,
-                              value.toString(),
-                            )) {
-                              appdata.writeImplicitData();
-                            }
-                            favPage.folderList?.updateFolders();
-                            favPage.setFolder(false, value.toString());
-                            return null;
-                          },
-                        );
-                      },
-                    ),
-                  if (!isAllFolder)
+                  // Both act on this folder's own comics only.
+                  if (!isAggregated)
                     MenuEntry(
                       icon: Icons.reorder,
                       text: "Reorder".tl,
@@ -768,7 +724,7 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage>
                         );
                       },
                     ),
-                  if (!isAllFolder)
+                  if (!isAggregated)
                     MenuEntry(
                       icon: Icons.update,
                       text: "Update Comics Info".tl,
@@ -783,32 +739,7 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage>
                       },
                     ),
                   if (!isAllFolder)
-                    MenuEntry(
-                      icon: Icons.delete_outline,
-                      text: "Delete Folder".tl,
-                      color: context.colorScheme.error,
-                      onClick: () {
-                        showConfirmDialog(
-                          context: App.rootContext,
-                          title: "Delete".tl,
-                          content: "Delete folder '@f' ?".tlParams({
-                            "f": widget.folder,
-                          }),
-                          btnColor: context.colorScheme.error,
-                          onConfirm: () {
-                            favPage.setFolder(false, null);
-                            LocalFavoritesManager().deleteFolder(widget.folder);
-                            if (FavoriteFolderSort.remove(
-                              appdata.implicitData,
-                              widget.folder,
-                            )) {
-                              appdata.writeImplicitData();
-                            }
-                            favPage.folderList?.updateFolders();
-                          },
-                        );
-                      },
-                    ),
+                    ..._folderMenuEntries(context, favPage, widget.folder),
                 ],
               ),
             ],
@@ -858,7 +789,7 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage>
                     text: "Invert Selection".tl,
                     onClick: invertSelection,
                   ),
-                  if (!isAllFolder)
+                  if (!isAggregated)
                     MenuEntry(
                       icon: Icons.delete_outline,
                       text: "Delete Comic".tl,
@@ -980,11 +911,42 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage>
               },
             ).paddingRight(8),
           ),
+        if (!searchMode && !multiSelectMode) ...[
+          if (!isAllFolder && parentFolder != null)
+            SliverToBoxAdapter(
+              child: _FolderBreadcrumb(favPage: favPage, folder: widget.folder),
+            ),
+          ...buildSubfolders(context),
+          if (hasActiveFilters)
+            SliverToBoxAdapter(child: buildFilterChips(context)),
+        ],
         if (isLoading)
           SliverToBoxAdapter(
             child: SizedBox(
               height: 200,
               child: const Center(child: CircularProgressIndicator()),
+            ),
+          )
+        else if (currentComics.isEmpty && !searchMode && subfolders.isEmpty)
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 64),
+              child: Column(
+                children: [
+                  Icon(
+                    Icons.collections_bookmark_outlined,
+                    size: 48,
+                    color: context.colorScheme.outline,
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    "No comics".tl,
+                    style: TextStyle(
+                      color: context.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
             ),
           )
         else
@@ -1011,7 +973,7 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage>
                   ),
             menuBuilder: (c) {
               return [
-                if (!isAllFolder)
+                if (!isAggregated)
                   MenuEntry(
                     icon: Icons.delete,
                     text: "Delete".tl,
@@ -1162,9 +1124,11 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage>
           ),
       ],
     );
+    var parent = parentFolder;
     return PopScope(
-      canPop: !multiSelectMode && !searchMode,
+      canPop: !multiSelectMode && !searchMode && parent == null,
       onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
         if (multiSelectMode) {
           exitSelectMode();
         } else if (searchMode) {
@@ -1173,1066 +1137,126 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage>
             keyword = "";
             updateComics();
           });
+        } else if (parent != null) {
+          // Back goes up one folder before it leaves the page.
+          favPage.setFolder(false, parent);
         }
       },
       child: body,
     );
   }
 
-  void _showSyncDialog() {
-    if (networkSource == null) return;
-    final selectUpdatePageNumKey = GlobalKey<_SelectUpdatePageNumState>();
-    showDialog(
-      context: context,
-      builder: (context) {
-        return ContentDialog(
-          title: "Sync".tl,
-          content: _SelectUpdatePageNum(
-            networkSource: networkSource!,
-            networkFolder: networkFolder,
-            key: selectUpdatePageNumKey,
-          ).paddingHorizontal(4),
-          actions: [
-            Button.filled(
-              child: Text("Update".tl),
-              onPressed: () {
-                context.pop();
-                importNetworkFolder(
-                  networkSource!,
-                  selectUpdatePageNumKey.currentState!.updatePageNum,
-                  widget.folder,
-                  networkFolder!,
-                ).then((value) {
-                  updateComics();
-                });
-              },
-            ),
-          ],
-        );
-      },
-    );
-  }
+  final covers = _FolderCovers();
 
-  void _showAutoLinkSourcesDialog() {
-    final searchableSources = ComicSource.all()
-        .where(
-          (source) =>
-              source.searchPageData?.loadPage != null ||
-              source.searchPageData?.loadNext != null,
-        )
-        .toList();
-    final selectedSources = searchableSources
-        .map((source) => source.key)
-        .toSet();
-    final targetComics = filterComics(comics);
-    if (targetComics.isEmpty) {
-      context.showMessage(message: "No comics".tl);
-      return;
-    }
-    if (searchableSources.isEmpty) {
-      context.showMessage(message: "No searchable sources".tl);
-      return;
-    }
-    showDialog(
-      context: context,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setState) {
-            return Dialog(
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8),
-                side: context.brightness == Brightness.dark
-                    ? BorderSide(color: context.colorScheme.outlineVariant)
-                    : BorderSide.none,
-              ),
-              insetPadding: context.width < 400
-                  ? const EdgeInsets.symmetric(horizontal: 4)
-                  : const EdgeInsets.symmetric(horizontal: 16),
-              child: SizedBox(
-                width: min(600, max(280, context.width - 64)),
-                height: min(560, max(320, context.height - 96)),
-                child: Column(
-                  children: [
-                    Appbar(
-                      leading: IconButton(
-                        icon: const Icon(Icons.close),
-                        onPressed: context.pop,
-                      ),
-                      title: Text("Auto link comic sources".tl),
-                      backgroundColor: Colors.transparent,
-                    ),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            "Auto link sources warning".tlParams({
-                              "count": targetComics.length,
-                            }),
-                            style: TextStyle(
-                              color: context.colorScheme.onSurfaceVariant,
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          Row(
-                            children: [
-                              Text("Select Source".tl, style: ts.s16),
-                              const Spacer(),
-                              TextButton(
-                                onPressed: () {
-                                  setState(() {
-                                    selectedSources
-                                      ..clear()
-                                      ..addAll(
-                                        searchableSources.map(
-                                          (source) => source.key,
-                                        ),
-                                      );
-                                  });
-                                },
-                                child: Text("Select All".tl),
-                              ),
-                              TextButton(
-                                onPressed: () {
-                                  setState(selectedSources.clear);
-                                },
-                                child: Text("Deselect".tl),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 6),
-                          Expanded(
-                            child: ListView.builder(
-                              itemCount: searchableSources.length,
-                              itemBuilder: (context, index) {
-                                final source = searchableSources[index];
-                                return CheckboxListTile(
-                                  dense: true,
-                                  value: selectedSources.contains(source.key),
-                                  title: Text(source.name),
-                                  onChanged: (value) {
-                                    setState(() {
-                                      if (value == true) {
-                                        selectedSources.add(source.key);
-                                      } else {
-                                        selectedSources.remove(source.key);
-                                      }
-                                    });
-                                  },
-                                );
-                              },
-                            ),
-                          ),
-                        ],
-                      ).paddingHorizontal(16),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.end,
-                        children: [
-                          Button.text(
-                            onPressed: () => context.pop(),
-                            child: Text("Cancel".tl),
-                          ),
-                          const SizedBox(width: 8),
-                          Button.filled(
-                            onPressed: () {
-                              if (selectedSources.isEmpty) {
-                                context.showMessage(
-                                  message: "Invalid input".tl,
-                                );
-                                return;
-                              }
-                              RelatedSourceTaskManager.instance.startAutoLink(
-                                folder: isAllFolder
-                                    ? "All Comics".tl
-                                    : widget.folder,
-                                favorites: targetComics,
-                                targetSourceKeys: selectedSources.toList(),
-                              );
-                              context.pop();
-                              App.rootContext.showMessage(
-                                message: "Task started".tl,
-                              );
-                            },
-                            child: Text("Start".tl),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          },
-        );
-      },
-    );
-  }
+  String? get parentFolder =>
+      isAllFolder ? null : manager.folderTree.parentOf(widget.folder);
 
-  void favoriteOption(String option) {
-    // Reset target selection so previous choices don't carry over.
-    selectedLocalFolders.clear();
-    var targetFolders = LocalFavoritesManager().folderNames
-        .where((folder) => folder != favPage.folder)
-        .toList();
+  List<String> get subfolders =>
+      isAllFolder ? const [] : manager.folderTree.childrenOf(widget.folder);
 
-    showPopUpWidget(
-      App.rootContext,
-      StatefulBuilder(
-        builder: (context, setState) {
-          return PopUpWidgetScaffold(
-            title: isAllFolder
-                ? "All".tl
-                : (favPage.folder ?? "Unselected".tl),
-            body: Padding(
-              // The scaffold already clears the system inset; this is just
-              // extra breathing room under the confirm button.
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Container(
-                constraints: const BoxConstraints(
-                  maxHeight: 700,
-                  maxWidth: 500,
-                ),
-                child: Column(
-                  children: [
-                    Expanded(
-                      child: ListView.builder(
-                        itemCount: targetFolders.length + 1,
-                        itemBuilder: (context, index) {
-                          if (index == targetFolders.length) {
-                            return SizedBox(
-                              height: 36,
-                              child: Center(
-                                child: TextButton(
-                                  onPressed: () {
-                                    newFolder().then((v) {
-                                      setState(() {
-                                        targetFolders = LocalFavoritesManager()
-                                            .folderNames
-                                            .where(
-                                              (folder) =>
-                                                  folder != favPage.folder,
-                                            )
-                                            .toList();
-                                      });
-                                    });
-                                  },
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      const Icon(Icons.add, size: 20),
-                                      const SizedBox(width: 4),
-                                      Text("New Folder".tl),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            );
-                          }
-                          var folder = targetFolders[index];
-                          var disabled = false;
-                          if (selectedLocalFolders.isNotEmpty) {
-                            if (added.contains(folder) &&
-                                !added.contains(selectedLocalFolders.first)) {
-                              disabled = true;
-                            } else if (!added.contains(folder) &&
-                                added.contains(selectedLocalFolders.first)) {
-                              disabled = true;
-                            }
-                          }
-                          return CheckboxListTile(
-                            title: Row(
-                              children: [
-                                Text(folder),
-                                const SizedBox(width: 8),
-                              ],
-                            ),
-                            value: selectedLocalFolders.contains(folder),
-                            onChanged: disabled
-                                ? null
-                                : (v) {
-                                    setState(() {
-                                      if (v!) {
-                                        // Moving from the aggregated view can
-                                        // only target a single folder, so keep
-                                        // the selection single-choice.
-                                        if (option == 'move' && isAllFolder) {
-                                          selectedLocalFolders.clear();
-                                        }
-                                        selectedLocalFolders.add(folder);
-                                      } else {
-                                        selectedLocalFolders.remove(folder);
-                                      }
-                                    });
-                                  },
-                          );
-                        },
-                      ),
-                    ),
-                    Center(
-                      child: FilledButton(
-                        onPressed: () {
-                          if (selectedLocalFolders.isEmpty) {
-                            return;
-                          }
-                          var comics = selectedItems.keys
-                              .map((e) => e as FavoriteItem)
-                              .toList();
-                          void execute() {
-                            if (option == 'move') {
-                              if (isAllFolder) {
-                                // Aggregated view: each comic may live in a
-                                // different folder, so move it out of all its
-                                // source folders into the single target.
-                                LocalFavoritesManager()
-                                    .batchMoveFavoritesToFolder(
-                                  selectedLocalFolders.first,
-                                  comics,
-                                );
-                              } else {
-                                for (var f in selectedLocalFolders) {
-                                  LocalFavoritesManager().batchMoveFavorites(
-                                    favPage.folder as String,
-                                    f,
-                                    comics,
-                                  );
-                                }
-                              }
-                            } else {
-                              if (isAllFolder) {
-                                for (var f in selectedLocalFolders) {
-                                  LocalFavoritesManager()
-                                      .batchCopyFavoritesToFolder(f, comics);
-                                }
-                              } else {
-                                for (var f in selectedLocalFolders) {
-                                  LocalFavoritesManager().batchCopyFavorites(
-                                    favPage.folder as String,
-                                    f,
-                                    comics,
-                                  );
-                                }
-                              }
-                            }
-                            App.rootContext.pop();
-                            updateComics();
-                            _cancel();
-                          }
-
-                          // Moving from the aggregated view removes the comics
-                          // from every folder they currently belong to, so ask
-                          // the user to confirm before doing it.
-                          if (option == 'move' && isAllFolder) {
-                            showConfirmDialog(
-                              context: App.rootContext,
-                              title: "Move to folder".tl,
-                              content: "Move @c comics to \"@f\"? They will be removed from all other folders."
-                                  .tlParams({
-                                "c": comics.length,
-                                "f": selectedLocalFolders.first,
-                              }),
-                              onConfirm: execute,
-                            );
-                          } else {
-                            execute();
-                          }
-                        },
-                        child: Text(option == 'move' ? "Move".tl : "Add".tl),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  void _cancel() => exitSelectMode();
-
-  void _deleteComicWithId() {
-    var toBeDeleted = selectedItems.keys
-        .map((e) => e as FavoriteItem)
-        .toList();
-    LocalFavoritesManager().batchDeleteComics(widget.folder, toBeDeleted);
-    _cancel();
-  }
-
-  /// Swipe-cancel a favorite from the list without opening the comic. In a
-  /// specific folder it removes the comic from that folder; in the aggregated
-  /// "All" view "cancel favorite" means a full unfavorite, so it removes the
-  /// comic from every folder it belongs to. Either way an undo toast restores
-  /// the exact membership (mirrors the read-later swipe-delete pattern).
-  void _removeFavoriteSwipe(FavoriteItem c) {
-    void showUndo(VoidCallback undo) {
-      if (!mounted) return;
-      showToast(
-        context: context,
-        message: "Removed from favorites".tl,
-        trailing: TextButton(
-          onPressed: undo,
-          child: Text("Undo".tl),
-        ),
-      );
-    }
-
-    if (isAllFolder) {
-      var folders = manager.find(c.id, c.type);
-      manager.batchDeleteComicsInAllFolders([ComicID(c.type, c.id)]);
-      showUndo(() {
-        for (var f in folders) {
-          manager.addComic(f, c);
-        }
-      });
-    } else {
-      manager.deleteComicWithId(widget.folder, c.id, c.type);
-      showUndo(() => manager.addComic(widget.folder, c));
-    }
-  }
-}
-
-class _ReorderComicsPage extends StatefulWidget {
-  const _ReorderComicsPage(this.name, this.onReorder);
-
-  final String name;
-
-  final void Function(List<FavoriteItem>) onReorder;
-
-  @override
-  State<_ReorderComicsPage> createState() => _ReorderComicsPageState();
-}
-
-class _ReorderComicsPageState extends State<_ReorderComicsPage> {
-  final _key = GlobalKey();
-  var reorderWidgetKey = UniqueKey();
-  final _scrollController = ScrollController();
-  late var comics = LocalFavoritesManager().getFolderComics(widget.name);
-  bool changed = false;
-
-  /// Set once the grid has been remounted to rebuild its position cache.
-  /// Remounting treats every tile as new, which would replay the fade-in, so
-  /// the fade is dropped from that point on.
-  bool positionsRebuilt = false;
-
-  static int _floatToInt8(double x) {
-    return (x * 255.0).round() & 0xff;
-  }
-
-  Color lightenColor(Color color, double lightenValue) {
-    int red = (_floatToInt8(color.r) + ((255 - color.r) * lightenValue))
-        .round();
-    int green = (_floatToInt8(color.g) * 255 + ((255 - color.g) * lightenValue))
-        .round();
-    int blue = (_floatToInt8(color.b) * 255 + ((255 - color.b) * lightenValue))
-        .round();
-
-    return Color.fromARGB(_floatToInt8(color.a), red, green, blue);
-  }
-
-  @override
-  void dispose() {
-    if (changed) {
-      // Delay to ensure navigation is completed
-      Future.delayed(const Duration(milliseconds: 200), () {
-        LocalFavoritesManager().reorder(comics, widget.name);
-      });
-    }
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    var type = appdata.settings['comicDisplayMode'];
-    var tiles = comics.map((e) {
-      var comicSource = e.type.comicSource;
-      return ComicTile(
-        key: Key(e.hashCode.toString()),
-        enableLongPressed: false,
-        comic: Comic(
-          e.name,
-          e.coverPath,
-          e.id,
-          e.author,
-          e.tags,
-          type == 'detailed'
-              ? "${e.time} | ${comicSource?.name ?? "Unknown"}"
-              : "${e.type.comicSource?.name ?? "Unknown"} | ${e.time}",
-          comicSource?.key ?? (e.type == ComicType.local ? "local" : "Unknown"),
-          null,
-          null,
-        ),
-      );
-    }).toList();
-    return Scaffold(
-      appBar: Appbar(
-        title: Text("Reorder".tl),
-        actions: [
-          Tooltip(
-            message: "Information".tl,
-            child: IconButton(
-              icon: const Icon(Icons.info_outline),
-              onPressed: () {
-                showInfoDialog(
-                  context: context,
-                  title: "Reorder".tl,
-                  content: "Long press and drag to reorder.".tl,
-                );
-              },
-            ),
-          ),
-          Tooltip(
-            message: "Reverse".tl,
-            child: IconButton(
-              icon: const Icon(Icons.swap_vert),
-              onPressed: () {
-                setState(() {
-                  comics = comics.reversed.toList();
-                  changed = true;
-                  // Reversing moves every item at once. The grid caches each
-                  // item's position and only refreshes entries it rebuilds, so
-                  // off-screen items keep stale positions and later drags land
-                  // on the wrong index. A new key rebuilds those positions.
-                  reorderWidgetKey = UniqueKey();
-                  positionsRebuilt = true;
-                });
-              },
-            ),
-          ),
-        ],
-      ),
-      body: ReorderableBuilder<FavoriteItem>(
-        key: reorderWidgetKey,
-        scrollController: _scrollController,
-        animationConfig: ReorderableAnimationConfig(
-          fadeInDuration: positionsRebuilt
-              ? Duration.zero
-              : const Duration(milliseconds: 500),
-        ),
-        longPressDelay: App.isDesktop
-            ? const Duration(milliseconds: 100)
-            : const Duration(milliseconds: 500),
-        onReorder: (reorderFunc) {
-          changed = true;
-          setState(() {
-            comics = reorderFunc(comics);
-          });
-          widget.onReorder(comics);
-        },
-        dragChildBoxDecoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(16),
-          color: lightenColor(
-            Theme.of(context).splashColor.withAlpha(255),
-            0.2,
+  List<Widget> buildSubfolders(BuildContext context) {
+    var children = subfolders;
+    if (children.isEmpty) return const [];
+    return [
+      SliverToBoxAdapter(
+        child: _SectionTitle(
+          "Subfolders".tl,
+          trailing: FilterChip(
+            label: Text("Include subfolder comics".tl),
+            selected: includeSubfolders,
+            onSelected: setIncludeSubfolders,
           ),
         ),
-        builder: (children) {
-          return GridView(
-            key: _key,
-            controller: _scrollController,
-            gridDelegate: SliverGridDelegateWithComics(),
-            children: children,
-          );
-        },
-        children: tiles,
       ),
-    );
-  }
-}
-
-class _SelectUpdatePageNum extends StatefulWidget {
-  const _SelectUpdatePageNum({
-    required this.networkSource,
-    this.networkFolder,
-    super.key,
-  });
-
-  final String? networkFolder;
-  final String networkSource;
-
-  @override
-  State<_SelectUpdatePageNum> createState() => _SelectUpdatePageNumState();
-}
-
-class _SelectUpdatePageNumState extends State<_SelectUpdatePageNum> {
-  int updatePageNum = 9999999;
-
-  String get _allPageText => 'All'.tl;
-
-  List<String> get pageNumList => [
-    '1',
-    '2',
-    '3',
-    '5',
-    '10',
-    '20',
-    '50',
-    '100',
-    '200',
-    _allPageText,
-  ];
-
-  @override
-  void initState() {
-    updatePageNum =
-        appdata.implicitData["local_favorites_update_page_num"] ?? 9999999;
-    super.initState();
+      SliverPadding(
+        padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+        sliver: SliverGrid(
+          gridDelegate: _folderGridDelegate(context),
+          delegate: SliverChildBuilderDelegate(
+            (context, index) =>
+                _folderCardFor(context, favPage, children[index], covers),
+            childCount: children.length,
+          ),
+        ),
+      ),
+    ];
   }
 
-  @override
-  Widget build(BuildContext context) {
-    var source = ComicSource.find(widget.networkSource);
-    var sourceName = source?.name ?? widget.networkSource;
-    var text = "The folder is Linked to @source".tlParams({
-      "source": sourceName,
+  bool get hasActiveFilters =>
+      readFilterSelect != readFilterList[0] ||
+      downloadFilterSelect != downloadFilterList[0] ||
+      sourceFilterSelect.isNotEmpty ||
+      tagFilterSelect.isNotEmpty ||
+      authorFilterSelect.isNotEmpty;
+
+  /// Applies [edit] to the filters and stores them as the dialog does.
+  void editFilters(VoidCallback edit) {
+    setState(() {
+      edit();
+      updateFilteredComics();
     });
-    if (widget.networkFolder != null && widget.networkFolder!.isNotEmpty) {
-      text += "\n${"Source Folder".tl}: ${widget.networkFolder}";
+    saveLocalFavoritesFilters(
+      readFilter: readFilterSelect,
+      downloadFilter: downloadFilterSelect,
+      sourceFilter: sourceFilterSelect,
+      tagFilter: tagFilterSelect,
+      authorFilter: authorFilterSelect,
+      tagMatchAll: tagMatchAll,
+      authorMatchAll: authorMatchAll,
+    );
+  }
+
+  /// Every active filter as a chip that removes it.
+  Widget buildFilterChips(BuildContext context) {
+    var chips = <Widget>[];
+    void add(String label, VoidCallback remove) {
+      chips.add(
+        InputChip(
+          label: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+          onDeleted: () => editFilters(remove),
+        ),
+      );
     }
 
-    return Column(
-      children: [
-        Row(children: [Text(text)]),
-        Row(
-          children: [
-            Text("Update the page number by the latest collection".tl),
-            Spacer(),
-            Select(
-              current: updatePageNum.toString() == '9999999'
-                  ? _allPageText
-                  : updatePageNum.toString(),
-              values: pageNumList,
-              minWidth: 48,
-              onTap: (index) {
-                setState(() {
-                  updatePageNum = int.parse(
-                    pageNumList[index] == _allPageText
-                        ? '9999999'
-                        : pageNumList[index],
-                  );
-                  appdata.implicitData["local_favorites_update_page_num"] =
-                      updatePageNum;
-                  appdata.writeImplicitData();
-                });
-              },
-            ),
-          ],
+    if (readFilterSelect != readFilterList[0]) {
+      add(readFilterSelect.tl, () => readFilterSelect = readFilterList[0]);
+    }
+    if (downloadFilterSelect != downloadFilterList[0]) {
+      add(
+        downloadFilterSelect.tl,
+        () => downloadFilterSelect = downloadFilterList[0],
+      );
+    }
+    for (var s in sourceFilterSelect) {
+      add(
+        sourceFilterLabel(s),
+        () => sourceFilterSelect = {...sourceFilterSelect}..remove(s),
+      );
+    }
+    for (var t in tagFilterSelect) {
+      add(t, () => tagFilterSelect = {...tagFilterSelect}..remove(t));
+    }
+    for (var a in authorFilterSelect) {
+      add(a, () => authorFilterSelect = {...authorFilterSelect}..remove(a));
+    }
+    if (chips.length > 1) {
+      chips.add(
+        ActionChip(
+          avatar: const Icon(Icons.filter_alt_off_outlined, size: 18),
+          label: Text("Clear filters".tl),
+          onPressed: () => editFilters(() {
+            readFilterSelect = readFilterList[0];
+            downloadFilterSelect = downloadFilterList[0];
+            sourceFilterSelect = {};
+            tagFilterSelect = {};
+            authorFilterSelect = {};
+          }),
         ),
-      ],
-    );
-  }
-}
-
-class _LocalFavoritesFilterDialog extends StatefulWidget {
-  const _LocalFavoritesFilterDialog({
-    required this.initReadFilterSelect,
-    required this.initDownloadFilterSelect,
-    required this.initSourceFilterSelect,
-    required this.initTagFilterSelect,
-    required this.initAuthorFilterSelect,
-    required this.initTagMatchAll,
-    required this.initAuthorMatchAll,
-    required this.sourceFilterValues,
-    required this.sourceFilterLabel,
-    required this.tagFilterValues,
-    required this.authorFilterValues,
-    required this.updateConfig,
-  });
-
-  final String initReadFilterSelect;
-  final String initDownloadFilterSelect;
-  final Set<String> initSourceFilterSelect;
-  final Set<String> initTagFilterSelect;
-  final Set<String> initAuthorFilterSelect;
-  final bool initTagMatchAll;
-  final bool initAuthorMatchAll;
-  final List<String> sourceFilterValues;
-  final String Function(String sourceKey) sourceFilterLabel;
-  final List<MapEntry<String, int>> tagFilterValues;
-  final List<MapEntry<String, int>> authorFilterValues;
-  final void Function(
-    String readFilter,
-    String downloadFilter,
-    Set<String> sourceFilter,
-    Set<String> tagFilter,
-    Set<String> authorFilter,
-    bool tagMatchAll,
-    bool authorMatchAll,
-  )
-  updateConfig;
-
-  @override
-  State<_LocalFavoritesFilterDialog> createState() =>
-      _LocalFavoritesFilterDialogState();
-}
-
-const readFilterList = ['All', 'UnCompleted', 'Completed'];
-
-const downloadFilterList = ['All', 'Downloaded', 'Not Downloaded'];
-
-class _LocalFavoritesFilterDialogState
-    extends State<_LocalFavoritesFilterDialog> {
-  late var readFilter = widget.initReadFilterSelect;
-  late var downloadFilter = widget.initDownloadFilterSelect;
-  late var sourceFilter = {...widget.initSourceFilterSelect};
-  late var tagFilter = {...widget.initTagFilterSelect};
-  late var authorFilter = {...widget.initAuthorFilterSelect};
-  late bool tagMatchAll = widget.initTagMatchAll;
-  late bool authorMatchAll = widget.initAuthorMatchAll;
-  String tagSearch = "";
-  String authorSearch = "";
-  bool sourceExpanded = false;
-  bool tagExpanded = false;
-  bool authorExpanded = false;
-
-  @override
-  void initState() {
-    super.initState();
-    sourceExpanded = sourceFilter.isNotEmpty;
-    tagExpanded = tagFilter.isNotEmpty;
-    authorExpanded = authorFilter.isNotEmpty;
-  }
-
-  Widget _buildSection({
-    required String title,
-    required bool expanded,
-    required VoidCallback onToggle,
-    required Widget Function() childBuilder,
-    String? badge,
-  }) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        InkWell(
-          onTap: onToggle,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    title,
-                    style: Theme.of(context).textTheme.titleSmall,
-                  ),
-                ),
-                if (badge != null && badge.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: Text(
-                      badge,
-                      style: TextStyle(
-                        color: context.colorScheme.primary,
-                        fontSize: 12,
-                      ),
-                    ),
-                  ),
-                Icon(expanded ? Icons.expand_less : Icons.expand_more),
-              ],
-            ),
-          ),
-        ),
-        if (expanded) childBuilder(),
-      ],
-    );
-  }
-
-
-  Widget _buildChipSection({
-    required List<MapEntry<String, int>> values,
-    required Set<String> selected,
-    required String search,
-    required ValueChanged<String> onSearchChanged,
-    required void Function(String tag, bool sel) onSelectChanged,
-    required String emptyText,
-    required String emptyMatchText,
-    required String searchHint,
-    required bool matchAll,
-    required ValueChanged<bool> onMatchModeChanged,
-  }) {
-    final filtered = search.trim().isEmpty
-        ? values
-        : values
-              .where(
-                (e) => e.key.toLowerCase().contains(
-                  search.trim().toLowerCase(),
-                ),
-              )
-              .toList();
+      );
+    }
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: values.length > 8
-                      ? TextField(
-                          decoration: InputDecoration(
-                            isDense: true,
-                            hintText: searchHint,
-                            prefixIcon: const Icon(Icons.search, size: 18),
-                            border: const OutlineInputBorder(),
-                            contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 8,
-                            ),
-                          ),
-                          onChanged: onSearchChanged,
-                        )
-                      : const SizedBox.shrink(),
-                ),
-                if (values.length > 8) const SizedBox(width: 8),
-                InkWell(
-                  borderRadius: BorderRadius.circular(4),
-                  onTap: () => onMatchModeChanged(!matchAll),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 6,
-                    ),
-                    decoration: BoxDecoration(
-                      color: matchAll
-                          ? context.colorScheme.primaryContainer
-                          : null,
-                      border: Border.all(
-                        color: matchAll
-                            ? context.colorScheme.primary
-                            : context.colorScheme.outlineVariant,
-                      ),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: Text(
-                      matchAll ? "Match all".tl : "Match any".tl,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: matchAll
-                            ? context.colorScheme.primary
-                            : context.colorScheme.outline,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          if (values.isEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              child: Text(
-                emptyText,
-                style: TextStyle(color: context.colorScheme.outline),
-              ),
-            )
-          else if (filtered.isEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              child: Text(
-                emptyMatchText,
-                style: TextStyle(color: context.colorScheme.outline),
-              ),
-            )
-          else
-            Wrap(
-              spacing: 6,
-              runSpacing: 4,
-              children: filtered.map((entry) {
-                final isSel = selected.contains(entry.key);
-                return FilterChip(
-                  label: Text("${entry.key} (${entry.value})"),
-                  selected: isSel,
-                  onSelected: (s) => onSelectChanged(entry.key, s),
-                );
-              }).toList(),
-            ),
-          const SizedBox(height: 8),
-        ],
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return ContentDialog(
-      title: "Filter".tl,
-      content: ConstrainedBox(
-        constraints: BoxConstraints(
-          maxHeight: MediaQuery.of(context).size.height * 0.6,
-        ),
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ListTile(
-                title: Text("Filter reading status".tl),
-                trailing: Select(
-                  current: readFilter.tl,
-                  values: readFilterList.map((e) => e.tl).toList(),
-                  minWidth: 64,
-                  onTap: (index) {
-                    setState(() {
-                      readFilter = readFilterList[index];
-                    });
-                  },
-                ),
-              ),
-              const Divider(height: 1),
-              ListTile(
-                title: Text("Filter download status".tl),
-                trailing: Select(
-                  current: downloadFilter.tl,
-                  values: downloadFilterList.map((e) => e.tl).toList(),
-                  minWidth: 64,
-                  onTap: (index) {
-                    setState(() {
-                      downloadFilter = downloadFilterList[index];
-                    });
-                  },
-                ),
-              ),
-              const Divider(height: 1),
-              _buildSection(
-                title: "Filter comic source".tl,
-                expanded: sourceExpanded,
-                badge: sourceFilter.isEmpty ? null : "${sourceFilter.length}",
-                onToggle: () =>
-                    setState(() => sourceExpanded = !sourceExpanded),
-                childBuilder: () => Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: widget.sourceFilterValues.map((sourceKey) {
-                    return CheckboxListTile(
-                      dense: true,
-                      title: Text(widget.sourceFilterLabel(sourceKey)),
-                      value: sourceFilter.contains(sourceKey),
-                      onChanged: (checked) {
-                        setState(() {
-                          if (checked ?? false) {
-                            sourceFilter.add(sourceKey);
-                          } else {
-                            sourceFilter.remove(sourceKey);
-                          }
-                        });
-                      },
-                    );
-                  }).toList(),
-                ),
-              ),
-              const Divider(height: 1),
-              _buildSection(
-                title: "Filter authors".tl,
-                expanded: authorExpanded,
-                badge: authorFilter.isEmpty
-                    ? null
-                    : "${authorFilter.length}",
-                onToggle: () =>
-                    setState(() => authorExpanded = !authorExpanded),
-                childBuilder: () => _buildChipSection(
-                  values: widget.authorFilterValues,
-                  selected: authorFilter,
-                  search: authorSearch,
-                  onSearchChanged: (v) =>
-                      setState(() => authorSearch = v),
-                  onSelectChanged: (a, sel) => setState(() {
-                    if (sel) {
-                      authorFilter.add(a);
-                    } else {
-                      authorFilter.remove(a);
-                    }
-                  }),
-                  emptyText: "No authors".tl,
-                  emptyMatchText: "No matched authors".tl,
-                  searchHint: "Search authors".tl,
-                  matchAll: authorMatchAll,
-                  onMatchModeChanged: (v) =>
-                      setState(() => authorMatchAll = v),
-                ),
-              ),
-              const Divider(height: 1),
-              _buildSection(
-                title: "Filter tags".tl,
-                expanded: tagExpanded,
-                badge: tagFilter.isEmpty ? null : "${tagFilter.length}",
-                onToggle: () => setState(() => tagExpanded = !tagExpanded),
-                childBuilder: () => _buildChipSection(
-                  values: widget.tagFilterValues,
-                  selected: tagFilter,
-                  search: tagSearch,
-                  onSearchChanged: (v) =>
-                      setState(() => tagSearch = v),
-                  onSelectChanged: (t, sel) => setState(() {
-                    if (sel) {
-                      tagFilter.add(t);
-                    } else {
-                      tagFilter.remove(t);
-                    }
-                  }),
-                  emptyText: "No tags".tl,
-                  emptyMatchText: "No matched tags".tl,
-                  searchHint: "Search tags".tl,
-                  matchAll: tagMatchAll,
-                  onMatchModeChanged: (v) =>
-                      setState(() => tagMatchAll = v),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () {
-            setState(() {
-              readFilter = readFilterList[0];
-              downloadFilter = downloadFilterList[0];
-              sourceFilter.clear();
-              tagFilter.clear();
-              authorFilter.clear();
-              tagSearch = "";
-              authorSearch = "";
-            });
-          },
-          child: Text("Reset".tl),
-        ),
-        FilledButton(
-          onPressed: () {
-            appdata.implicitData["local_favorites_read_filter"] = readFilter;
-            appdata.implicitData["local_favorites_download_filter"] =
-                downloadFilter;
-            appdata.implicitData["local_favorites_source_filter"] = sourceFilter
-                .toList();
-            appdata.implicitData["local_favorites_tag_filter"] = tagFilter
-                .toList();
-            appdata.implicitData["local_favorites_author_filter"] =
-                authorFilter.toList();
-            appdata.implicitData["local_favorites_tag_match_all"] = tagMatchAll;
-            appdata.implicitData["local_favorites_author_match_all"] =
-                authorMatchAll;
-            appdata.writeImplicitData();
-            if (mounted) {
-              Navigator.pop(context);
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                widget.updateConfig(
-                  readFilter,
-                  downloadFilter,
-                  Set<String>.from(sourceFilter),
-                  Set<String>.from(tagFilter),
-                  Set<String>.from(authorFilter),
-                  tagMatchAll,
-                  authorMatchAll,
-                );
-              });
-            }
-          },
-          child: Text("Confirm".tl),
-        ),
-      ],
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      child: Wrap(spacing: 8, runSpacing: 8, children: chips),
     );
   }
 }
