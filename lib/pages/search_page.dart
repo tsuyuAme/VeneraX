@@ -10,6 +10,7 @@ import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/global_state.dart';
 import 'package:venera/pages/aggregated_search_page.dart';
 import 'package:venera/pages/search_result_page.dart';
+import 'package:venera/pages/search/search_shortcuts.dart';
 import 'package:venera/pages/settings/settings_page.dart';
 import 'package:venera/utils/app_links.dart';
 import 'package:venera/utils/ext.dart';
@@ -247,6 +248,7 @@ class _SearchPageState extends State<SearchPage> {
         child: buildSearchOptions(),
       );
       yield _SearchHistory(search);
+      yield const SearchShortcutsSliver();
     }
   }
 
@@ -579,113 +581,110 @@ class _SearchHistory extends StatefulWidget {
 }
 
 class _SearchHistoryState extends State<_SearchHistory> {
+  static const int _chipPreview = 10;
+  bool _expanded = true;
+  bool _showAllChips = false;
+
   @override
   Widget build(BuildContext context) {
-    return SliverList(
-      delegate: SliverChildBuilderDelegate((context, index) {
-        if (index == 0) {
-          return const SizedBox(height: 16);
-        }
-        if (index == 1) {
-          return ListTile(
-            leading: const Icon(Icons.history),
-            contentPadding: EdgeInsets.zero,
-            title: Text("Search History".tl),
-            trailing: Flyout(
-              flyoutBuilder: (context) {
-                return FlyoutContent(
-                  title: "Clear Search History".tl,
-                  actions: [
-                    FilledButton(
-                      child: Text("Clear".tl),
-                      onPressed: () {
-                        appdata.clearSearchHistory();
-                        context.pop();
+    final history = appdata.searchHistory;
+    if (history.isEmpty) {
+      return const SliverToBoxAdapter(child: SizedBox.shrink());
+    }
+    final visible = _showAllChips
+        ? history
+        : history.take(_chipPreview).toList(growable: false);
+    final hasMore = history.length > _chipPreview && !_showAllChips;
+
+    return SliverToBoxAdapter(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: 8),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.history),
+              title: Text("Search History".tl),
+              subtitle: Text('${history.length}'),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Flyout(
+                    flyoutBuilder: (context) {
+                      return FlyoutContent(
+                        title: "Clear Search History".tl,
+                        actions: [
+                          FilledButton(
+                            child: Text("Clear".tl),
+                            onPressed: () {
+                              appdata.clearSearchHistory();
+                              context.pop();
+                              setState(() {});
+                            },
+                          ),
+                        ],
+                      );
+                    },
+                    child: Builder(
+                      builder: (context) {
+                        return Tooltip(
+                          message: "Clear".tl,
+                          child: IconButton(
+                            icon: const Icon(Icons.clear_all),
+                            onPressed: () {
+                              context
+                                  .findAncestorStateOfType<FlyoutState>()!
+                                  .show();
+                            },
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  IconButton(
+                    icon: Icon(
+                      _expanded ? Icons.expand_less : Icons.expand_more,
+                    ),
+                    onPressed: () {
+                      setState(() => _expanded = !_expanded);
+                    },
+                  ),
+                ],
+              ),
+              onTap: () => setState(() => _expanded = !_expanded),
+            ),
+            if (_expanded) ...[
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final text in visible)
+                    InputChip(
+                      label: Text(text, maxLines: 1, overflow: TextOverflow.ellipsis),
+                      onPressed: () => widget.search(text),
+                      onDeleted: () {
+                        appdata.removeSearchHistory(text);
+                        appdata.saveData();
                         setState(() {});
                       },
                     ),
-                  ],
-                );
-              },
-              child: Builder(
-                builder: (context) {
-                  return Tooltip(
-                    message: "Clear".tl,
-                    child: IconButton(
-                      icon: const Icon(Icons.delete_sweep_outlined),
+                  if (hasMore)
+                    ActionChip(
+                      label: Text('View more'.tl),
+                      avatar: const Icon(Icons.more_horiz, size: 18),
                       onPressed: () {
-                        context.findAncestorStateOfType<FlyoutState>()!.show();
+                        setState(() => _showAllChips = true);
                       },
                     ),
-                  );
-                },
+                ],
               ),
-            ),
-          );
-        }
-        return buildItem(index - 2);
-      }, childCount: 2 + appdata.searchHistory.length),
-    ).sliverPaddingHorizontal(16);
-  }
-
-  Widget buildItem(int index) {
-    void showMenu(Offset offset) {
-      showMenuX(context, offset, [
-        MenuEntry(
-          icon: Icons.copy,
-          text: 'Copy'.tl,
-          onClick: () {
-            Clipboard.setData(
-              ClipboardData(text: appdata.searchHistory[index]),
-            );
-          },
+              const SizedBox(height: 8),
+            ],
+          ],
         ),
-        MenuEntry(
-          icon: Icons.delete,
-          text: 'Delete'.tl,
-          onClick: () {
-            appdata.removeSearchHistory(appdata.searchHistory[index]);
-            appdata.saveData();
-            setState(() {});
-          },
-        ),
-      ]);
-    }
-
-    return Builder(
-      builder: (context) {
-        return InkWell(
-          onTap: () {
-            widget.search(appdata.searchHistory[index]);
-          },
-          onLongPress: () {
-            var renderBox = context.findRenderObject() as RenderBox;
-            var offset = renderBox.localToGlobal(Offset.zero);
-            showMenu(
-              Offset(
-                offset.dx + renderBox.size.width / 2 - 121,
-                offset.dy + renderBox.size.height - 8,
-              ),
-            );
-          },
-          onSecondaryTapUp: (details) {
-            showMenu(details.globalPosition);
-          },
-          child: Container(
-            decoration: BoxDecoration(
-              // color: context.colorScheme.surfaceContainer,
-              border: Border(
-                left: BorderSide(
-                  color: context.colorScheme.outlineVariant,
-                  width: 2,
-                ),
-              ),
-            ),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: Text(appdata.searchHistory[index], style: ts.s14),
-          ),
-        ).paddingBottom(8).paddingHorizontal(4);
-      },
+      ),
     );
   }
 }

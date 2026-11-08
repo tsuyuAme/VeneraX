@@ -30,6 +30,8 @@ import 'package:venera/pages/read_later_page.dart';
 import 'package:venera/pages/image_favorites_page/image_favorites_page.dart';
 import 'package:venera/pages/reading_statistics_page.dart';
 import 'package:venera/pages/search_page.dart';
+import 'package:venera/pages/search/artist_favorites_summary.dart';
+import 'package:venera/pages/search/artist_favorites_page.dart';
 import 'package:venera/pages/translated_comics_page.dart';
 import 'package:venera/utils/data_sync.dart';
 import 'package:venera/utils/import_comic.dart';
@@ -217,6 +219,8 @@ class _HomePageState extends State<HomePage> {
   Widget _sectionWidget(String id) {
     return switch (id) {
       'history' => const _History(key: ValueKey('history')),
+      'artistFavorites' =>
+          const _ArtistFavorites(key: ValueKey('artistFavorites')),
       'readLater' => const _ReadLater(key: ValueKey('readLater')),
       'translatedComics' => const _TranslatedComics(
         key: ValueKey('translatedComics'),
@@ -461,7 +465,7 @@ class _SearchBar extends StatelessWidget {
               child: AppSearchField(
                 height: height,
                 onTap: () {
-                  context.to(() => const SearchPage());
+                  NaviPane.of(context).currentPage = 1; // Search tab
                 },
               ),
             ),
@@ -630,6 +634,51 @@ class _SyncButtonState extends State<_SyncButton> with WidgetsBindingObserver {
               width: widget.height,
               height: widget.height,
               child: Center(child: icon),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ArtistFavorites extends StatelessWidget {
+  const _ArtistFavorites({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return SliverToBoxAdapter(
+      child: _HomeSectionSurface(
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: () {
+              context.to(() => const ArtistFavoritesPage());
+            },
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 10, 8, 4),
+                  child: Row(
+                    children: [
+                      _homeSectionIcon(context, Icons.person_outline),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _HomeSectionTitle(title: 'Favorite authors'.tl),
+                      ),
+                      Icon(
+                        Icons.chevron_right,
+                        color: context.colorScheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: 8),
+                    ],
+                  ),
+                ),
+                // Chips handle their own taps; absorb so parent InkWell
+                // does not steal chip presses incorrectly on some platforms.
+                const ArtistFavoritesHomeSection(),
+              ],
             ),
           ),
         ),

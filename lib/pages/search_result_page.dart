@@ -37,6 +37,10 @@ class _SearchResultPageState extends State<SearchResultPage> {
 
   late String text;
 
+  /// EH/ExHentai time-based seek (YYYY-MM-DD). Null = normal paging.
+  String? dateSeek;
+
+
   OverlayEntry? get suggestionOverlay => suggestionsController.entry;
 
   late _SuggestionsController suggestionsController;
@@ -59,6 +63,7 @@ class _SearchResultPageState extends State<SearchResultPage> {
       }
       setState(() {
         this.text = text!;
+        dateSeek = null; // new keyword → clear time seek
       });
       appdata.addSearchHistory(text);
       controller.currentText = text;
@@ -144,7 +149,12 @@ class _SearchResultPageState extends State<SearchResultPage> {
   /// Null when the target can't search: collections and online libraries are
   /// native sources built without a search implementation, and a source may also
   /// have been uninstalled since the tag or shared link was created.
-  SearchPageData? get _searchData => ComicSource.find(sourceKey)?.searchPageData;
+  bool get _isEhSource {
+    final k = sourceKey.toLowerCase();
+    return k.contains('ehentai') || k.contains('exhentai');
+  }
+
+    SearchPageData? get _searchData => ComicSource.find(sourceKey)?.searchPageData;
 
   @override
   Widget build(BuildContext context) {
@@ -163,7 +173,8 @@ class _SearchResultPageState extends State<SearchResultPage> {
       );
     }
     return ComicList(
-      key: Key(text + options.toString() + sourceKey),
+      // Include dateSeek so picking a date remounts the list from page 1.
+      key: Key('$text${options}$sourceKey${dateSeek ?? ''}'),
       enableSelection: true,
       selectionHandlerCallback: (fn) => _enterSelection = fn,
       scrollbarTopPadding: context.padding.top + 56,
@@ -180,16 +191,66 @@ class _SearchResultPageState extends State<SearchResultPage> {
             },
       loadNext: searchData.loadNext == null
           ? null
-          : (i) {
-              return searchData.loadNext!(text, i, options);
+          : (next) {
+              // First request (next == null) after date pick: pass seek token
+              // for EH source JS. Further pages use the cursor from the source.
+              if (dateSeek != null && next == null) {
+                return searchData.loadNext!(
+                  text,
+                  '__seek__:$dateSeek',
+                  options,
+                );
+              }
+              return searchData.loadNext!(text, next, options);
             },
     );
+  }
+
+  Future<void> _pickSeekDate() async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: dateSeek != null
+          ? DateTime.tryParse(dateSeek!) ?? now
+          : now,
+      firstDate: DateTime(2007),
+      lastDate: now,
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      dateSeek =
+          '${picked.year.toString().padLeft(4, '0')}-'
+          '${picked.month.toString().padLeft(2, '0')}-'
+          '${picked.day.toString().padLeft(2, '0')}';
+    });
+    // Force ComicList to reload from the first page with the seek token.
+    setState(() {});
   }
 
   Widget buildAction() {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
+        if (_isEhSource)
+          Tooltip(
+            message: dateSeek != null
+                ? '${'Seek'.tl}: $dateSeek'
+                : 'Seek by date'.tl,
+            child: IconButton(
+              icon: Icon(
+                Icons.calendar_month_outlined,
+                color: dateSeek != null
+                    ? Theme.of(context).colorScheme.primary
+                    : null,
+              ),
+              onPressed: _pickSeekDate,
+              onLongPress: dateSeek == null
+                  ? null
+                  : () {
+                      setState(() => dateSeek = null);
+                    },
+            ),
+          ),
         Tooltip(
           message: "Multi-Select".tl,
           child: IconButton(
