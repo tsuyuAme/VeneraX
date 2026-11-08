@@ -17,27 +17,7 @@ class _GalleryModeState extends State<_GalleryMode>
 
   late _ReaderState reader;
 
-  bool get showChapterCommentsAtEnd {
-    if (reader.mode != ReaderMode.galleryLeftToRight &&
-        reader.mode != ReaderMode.galleryRightToLeft) {
-      return false;
-    }
-    if (reader.widget.chapters == null) return false;
-    var source = ComicSource.find(reader.type.sourceKey);
-    if (source?.chapterCommentsLoader == null) return false;
-    return appdata.settings.getReaderSetting(
-              reader.cid,
-              reader.type.sourceKey,
-              'showChapterComments',
-            ) ==
-            true &&
-        appdata.settings.getReaderSetting(
-              reader.cid,
-              reader.type.sourceKey,
-              'showChapterCommentsAtEnd',
-            ) ==
-            true;
-  }
+  bool get showChapterCommentsAtEnd => reader._shouldShowChapterCommentsAtEnd;
 
   int get totalImagePages => reader.maxPage;
 
@@ -172,13 +152,22 @@ class _GalleryModeState extends State<_GalleryMode>
     }
   }
 
-  // ----- Landscape images on multi-image pages -----
-  // A landscape image gets a page to itself, but whether an image is
-  // landscape is only known once it has decoded. Images are measured off the
-  // decodes the reader does anyway (the page on screen and the precache
-  // window), and the pages regroup once the pager is at rest.
+  // ----- Decoded images -----
+  // An image's size is only known once it has decoded: whether it is
+  // landscape (a page to itself on multi-image pages, or cut in two when wide
+  // pages are split), and the size a single image is drawn at. Images are
+  // measured off the decodes the reader does anyway (the page on screen and
+  // the precache window), and the pages regroup once the pager is at rest.
 
-  final _measuredImages = <int>{};
+  /// Providers whose image has decoded since the gallery opened.
+  final _decoded = <ImageProvider>{};
+
+  /// Providers with a listener waiting for them to decode.
+  final _watching = <ImageProvider>{};
+
+  /// Images of single-image pages built before they had decoded; those pages
+  /// are rebuilt once they have.
+  final _awaitingDecode = <int>{};
 
   bool _regroupPending = false;
 
@@ -191,32 +180,54 @@ class _GalleryModeState extends State<_GalleryMode>
 
   void _measureImage(int index) {
     final images = reader.images;
-    if (reader.imagesPerPage <= 1 ||
-        images == null ||
-        index < 0 ||
-        index >= images.length ||
-        !_measuredImages.add(index)) {
+    if (images == null || index < 0 || index >= images.length) return;
+    _watchImage(_createImageProvider(index + 1, context), index);
+  }
+
+  /// Whether [provider]'s image has decoded and is still in memory, so a
+  /// [ComicImage] shows it at once. Reader providers are their own cache key.
+  bool _isDecoded(ImageProvider provider) {
+    if (!_decoded.contains(provider)) return false;
+    final status = PaintingBinding.instance.imageCache.statusForKey(provider);
+    return !status.pending && (status.keepAlive || status.live);
+  }
+
+  /// Records image [index]'s size once [provider] has decoded, and rebuilds
+  /// its page if that was built before.
+  void _watchImage(ImageProvider provider, int index) {
+    if (_watching.contains(provider) ||
+        (_isDecoded(provider) && reader.imageSizeOf(index) != null)) {
       return;
     }
-    final stream = _createImageProvider(
-      index + 1,
-      context,
-    ).resolve(createLocalImageConfiguration(context));
+    _watching.add(provider);
+    final stream = provider.resolve(createLocalImageConfiguration(context));
     late final ImageStreamListener listener;
     listener = ImageStreamListener(
       (info, _) {
-        final landscape = info.image.width > info.image.height;
+        final size = Size(
+          info.image.width.toDouble(),
+          info.image.height.toDouble(),
+        );
         info.dispose();
         stream.removeListener(listener);
+        _watching.remove(provider);
         if (!mounted) return;
-        if (landscape && reader.noteWideImage(index)) {
+        _decoded.add(provider);
+        if (reader.noteImageSize(index, size)) {
           _regroupPending = true;
           _scheduleRegroup();
+        }
+        if (_awaitingDecode.remove(index)) {
+          // May run inside a build when the image was already cached.
+          scheduleMicrotask(() {
+            if (mounted) setState(() {});
+          });
         }
       },
       onError: (_, _) {
         stream.removeListener(listener);
-        _measuredImages.remove(index);
+        _watching.remove(provider);
+        _decoded.remove(provider);
       },
     );
     stream.addListener(listener);
@@ -248,12 +259,16 @@ class _GalleryModeState extends State<_GalleryMode>
     _regroupPending = false;
     final oldPage = reader.page;
     final oldImages = getPageImagesRange(oldPage);
-    final newPage = reader.regroupGallery();
+    final oldHalf = reader.galleryLayout.halfOf(oldPage);
+    final newPage = reader.regroupGallery(backward: reader._turnedBack);
     if (newPage == null) return;
-    // The page can keep its number with fewer images on it; the pager is
-    // rebuilt whenever the page being read changed in any way.
+    // The page can keep its number with fewer images on it, or with half of
+    // its image; the pager is rebuilt whenever the page being read changed
+    // in any way.
     final remount =
-        newPage != oldPage || getPageImagesRange(newPage) != oldImages;
+        newPage != oldPage ||
+        getPageImagesRange(newPage) != oldImages ||
+        reader.galleryLayout.halfOf(newPage) != oldHalf;
     if (newPage != oldPage) {
       // Same images under a new number: not a turn for the e-ink refresh.
       if (reader._settledPosition == (reader.chapter, oldPage)) {
@@ -272,12 +287,35 @@ class _GalleryModeState extends State<_GalleryMode>
     _schedulePrecache(newPage);
   }
 
+  /// Moves the pairing on by one image at the page being read, or undoes the
+  /// shift there, and shows the page the pairing now starts on.
+  void shiftPairing() {
+    if (!mounted ||
+        !reader.canShiftPairing ||
+        reader.isPageAnimating ||
+        reader._rippleTurnPending ||
+        (controller.hasClients &&
+            controller.position.isScrollingNotifier.value)) {
+      return;
+    }
+    final oldPage = reader.page;
+    final newPage = reader.shiftGalleryPairing();
+    if (newPage == null) return;
+    if (reader._settledPosition == (reader.chapter, oldPage)) {
+      reader._settledPosition = (reader.chapter, newPage);
+    }
+    if (newPage != oldPage) reader.page = newPage;
+    setState(() => _remountPager = true);
+    context.readerScaffold.update();
+    _schedulePrecache(newPage);
+  }
+
   Widget _buildChapterCommentsPage() {
     var source = ComicSource.find(reader.type.sourceKey);
     var chapters = reader.widget.chapters;
     if (source == null || chapters == null) return const SizedBox();
     var chapterIndex = reader.chapter - 1;
-    return _EmbeddedChapterCommentsPage(
+    return EmbeddedChapterCommentsPage(
       comicId: reader.cid,
       epId: chapters.ids.elementAt(chapterIndex),
       source: source,
@@ -373,25 +411,11 @@ class _GalleryModeState extends State<_GalleryMode>
             photoViewControllers[index] ??= PhotoViewController();
 
             if (reader.imagesPerPage == 1 || pageImages.length == 1) {
-              final fillScreen = reader.effectiveSetting('galleryFillScreen') == true;
-              return PhotoViewGalleryPageOptions(
-                filterQuality: FilterQuality.medium,
-                controller: photoViewControllers[index],
-                imageProvider: _createImageProviderFromKey(
-                  pageImages[0],
-                  context,
-                  startIndex + 1,
-                ),
-                initialScale: fillScreen
-                    ? PhotoViewComputedScale.covered
-                    : PhotoViewComputedScale.contained,
-                minScale: fillScreen
-                    ? PhotoViewComputedScale.contained * 1.0
-                    : null,
-                maxScale: PhotoViewComputedScale.covered * 10.0,
-                errorBuilder: (_, error, s, retry) {
-                  return NetworkError(message: error.toString(), retry: retry);
-                },
+              return _buildSingleImagePage(
+                index,
+                pageImages[0],
+                startIndex,
+                photoViewControllers[index],
               );
             }
 
@@ -464,6 +488,80 @@ class _GalleryModeState extends State<_GalleryMode>
     return NotificationListener<ScrollEndNotification>(
       onNotification: _onPagerSettled,
       child: gallery,
+    );
+  }
+
+  /// A page with one image, or one half of a cut landscape image. Once
+  /// decoded, a [ComicImage] draws it, so the enhancement applies and copying,
+  /// saving and the enhancement preview find it. Until then PhotoView loads
+  /// it, since a custom child is scaled with the page and would shrink the
+  /// loading and error views. The child keeps the image's pixel size, so the
+  /// zoom steps (fit, fill, one image pixel per pixel) are unchanged.
+  PhotoViewGalleryPageOptions _buildSingleImagePage(
+    int page,
+    String imageKey,
+    int imageIndex,
+    PhotoViewController? controller,
+  ) {
+    final provider = _createImageProviderFromKey(
+      imageKey,
+      context,
+      imageIndex + 1,
+    );
+    final fillScreen = reader.effectiveSetting('galleryFillScreen') == true;
+    final initialScale = fillScreen
+        ? PhotoViewComputedScale.covered
+        : PhotoViewComputedScale.contained;
+    final minScale = fillScreen ? PhotoViewComputedScale.contained * 1.0 : null;
+    final maxScale = PhotoViewComputedScale.covered * 10.0;
+    // Watched first: a cached image reports its size right away.
+    _watchImage(provider, imageIndex);
+    final size = reader.imageSizeOf(imageIndex);
+    if (size == null || !_isDecoded(provider)) {
+      _awaitingDecode.add(imageIndex);
+      return PhotoViewGalleryPageOptions(
+        filterQuality: FilterQuality.medium,
+        controller: controller,
+        imageProvider: provider,
+        initialScale: initialScale,
+        minScale: minScale,
+        maxScale: maxScale,
+        errorBuilder: (_, error, s, retry) {
+          return NetworkError(
+            message: error.toString(),
+            retry: () {
+              retry();
+              _watchImage(provider, imageIndex);
+            },
+          );
+        },
+      );
+    }
+    final half = reader.galleryLayout.halfOf(page);
+    final childSize = half == null ? size : Size(size.width / 2, size.height);
+    final rightFirst = reader.galleryWidePageSplit == WidePageSplit.rightFirst;
+    final showsRight = rightFirst == (half == GalleryHalf.first);
+    return PhotoViewGalleryPageOptions.customChild(
+      controller: controller,
+      childSize: childSize,
+      initialScale: initialScale,
+      minScale: minScale,
+      maxScale: maxScale,
+      // A box of the image's (or the half's) shape: `cover` draws the image
+      // whole, or crops it to the half the alignment picks.
+      child: ComicImage(
+        image: provider,
+        width: childSize.width,
+        height: childSize.height,
+        fit: BoxFit.cover,
+        alignment: half == null
+            ? Alignment.center
+            : showsRight
+            ? Alignment.centerRight
+            : Alignment.centerLeft,
+        onInit: (state) => imageStates.add(state),
+        onDispose: (state) => imageStates.remove(state),
+      ),
     );
   }
 

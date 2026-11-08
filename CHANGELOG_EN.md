@@ -4,6 +4,80 @@
 
 [中文](CHANGELOG.md) | English
 
+## [v2.3.12](https://github.com/Kyosee/VeneraX/releases/tag/v2.3.12) - 2026-11-08
+
+### Added
+- Added a Multi-Select button to the local favorites toolbar for organizing comics in bulk.
+- Added Read and Continue reading actions to comic menus so you can start reading or resume your last position directly.
+- Added an Actions button to detailed comic lists on mobile for opening a comic's menu with a tap.
+
+### Changed
+- Improved compatibility with iOS 27 and iPhone Duo, including full-screen layouts on the unfolded inner display.
+- Organized settings into 10 categories, with category navigation on the left on desktop and a category list on mobile.
+- Settings pages now show common options first, with further options such as page layout and gestures under More settings.
+- Improved settings layouts on large screens, made single options fill their row, and tightened mobile header spacing to reduce empty space and duplicate titles.
+- Settings now switch between one and two panes based on the available width, improving layouts on foldables, split-screen views and smaller desktop windows.
+- Enlarged desktop comic menu text and click targets, and grouped actions such as favorites and collections more clearly.
+- Mobile comic menus now open as bottom sheets that emphasize reading and show shortcuts and current states for favorites, read later and downloads.
+- Updated the English and Chinese guides with the new settings paths, search, reader sidebar and menu controls.
+
+### Fixed
+- Fixed overlapping and overflowing text in the reading settings sidebar on high-resolution windows.
+- Fixed secondary settings opening full screen from the reader sidebar; navigation and Back now stay inside the sidebar.
+- Fixed duplicate spacing along screen edges on some devices and cramped settings content in narrow windows.
+- Fixed keyboard navigation not becoming available immediately after opening a desktop menu.
+- Fixed some guide contents entries failing to jump to their sections.
+
+### Removed
+- No features were removed in this release.
+
+**Full Changelog**: https://github.com/Kyosee/VeneraX/compare/v2.3.11...v2.3.12
+
+## [v2.3.11](https://github.com/Kyosee/VeneraX/releases/tag/v2.3.11) - 2026-11-07
+
+### Added
+- The reading settings sidebar now has a search box at the top. Search in your display language or English, then select a result to jump to the setting, including options inside collapsed groups.
+- Long-press the night mode button to adjust its intensity in a compact popup. Changes appear immediately and are saved automatically.
+- Long-press the auto page turning button to choose between turning pages and scrolling. Scrolling is available in continuous reading modes; a short press still starts or stops automatic reading.
+- Linux users can now download AppImage packages for x86_64 and ARM64, alongside the existing installation packages.
+
+### Changed
+- Settings sliders and the reading progress bar now use rounded handles and gradient tracks that follow the app's theme color.
+
+### Fixed
+- Fixed the reading progress slider occasionally jumping to the page before the one selected.
+- Fixed chapter comments not appearing at the end of chapters in continuous reading modes when Show Chapter Comments is enabled.
+
+### Removed
+- No features were removed in this release.
+
+**Full Changelog**: https://github.com/Kyosee/VeneraX/compare/v2.3.10...v2.3.11
+
+## [v2.3.10](https://github.com/Kyosee/VeneraX/releases/tag/v2.3.10) - 2026-11-06
+
+### Added
+- "Split wide pages" now works in gallery modes too: a landscape page (usually two pages scanned as one) is cut down the middle and each half gets a screen of its own. Choose "Right half first" or "Left half first"; pick "Right half first" for comics read right to left. It applies only with one image per screen.
+- With two or more images per screen in gallery modes, a new "Shift pages by one" button in the reader's bottom bar helps when an extra single page in a chapter, such as a color page or an ad, throws every later two-page spread out of line. Tap it and the current screen shows only its first image, and the pages after it are paired again from the next screen. Tap "Undo page shift" on the same screen to undo it. Shifts are saved per chapter and synced with your other reading settings.
+- Added "Export Translation Results" under Data & Sync. The file holds only translated pages; open it with "Import App Data" on another device to add them without changing anything else there.
+- "Skip Sync Items" has a new "Translation Results" entry that keeps translations on this device only, out of WebDAV sync.
+
+### Changed
+- When translations sync over WebDAV, translations you delete on one device (a chapter's, a whole comic's, or all of them with "Clear translation results") are now deleted on your other devices too, instead of being synced back.
+- With WebDAV sync on, translations are uploaded automatically when a pre-translation finishes.
+
+### Fixed
+- Fixed re-translated pages not reaching other devices over WebDAV sync. When two devices both have a page's translation, the newer one is now kept.
+- Fixed some pages failing AI translation over and over while still spending API tokens: replies that took a long time were cut off midway.
+- Fixed image enhancement not applying in gallery modes with one image per screen, and "Copy Image" and "Save Image" in the right-click menu reporting "No Image" there.
+- Fixed comics matching a block rule missing from the Local and Translation Library pages (while still showing on the home page), so they couldn't be opened or deleted.
+- Fixed tapping a follow-updates, sync, import/export or download notification on Android sometimes only bringing the app forward without opening the matching page. Tapping one while reading now closes the reader first, keeping your progress.
+- Fixed the Linux deb and Arch packages failing to start because of missing libraries.
+
+### Removed
+- No features were removed in this release.
+
+**Full Changelog**: https://github.com/Kyosee/VeneraX/compare/v2.3.9...v2.3.10
+
 ## [v2.3.9](https://github.com/Kyosee/VeneraX/releases/tag/v2.3.9) - 2026-10-28
 
 ### Added

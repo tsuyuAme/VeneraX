@@ -545,6 +545,7 @@ class _HistoryPageState extends State<HistoryPage>
                 SliverGridComics(
                   comics: entry.value,
                   selections: selectedItems,
+                  enableContextMenu: !multiSelectMode,
                   onLongPressed: null,
                   swipeActionBuilder: multiSelectMode
                       ? null
@@ -575,6 +576,16 @@ class _HistoryPageState extends State<HistoryPage>
                   menuBuilder: (c) {
                     return [
                       MenuEntry(
+                        action: MenuAction.select,
+                        icon: Icons.checklist,
+                        text: 'Multi-Select'.tl,
+                        onClick: () => setState(() {
+                          multiSelectMode = true;
+                          selectedItems[c as History] = true;
+                        }),
+                      ),
+                      MenuEntry(
+                        group: MenuGroup.more,
                         icon: Icons.refresh,
                         text: 'Refresh Info'.tl,
                         onClick: () {
@@ -582,6 +593,8 @@ class _HistoryPageState extends State<HistoryPage>
                         },
                       ),
                       MenuEntry(
+                        action: MenuAction.remove,
+                        destructive: true,
                         icon: Icons.delete_outline,
                         text: 'Remove'.tl,
                         color: context.colorScheme.error,

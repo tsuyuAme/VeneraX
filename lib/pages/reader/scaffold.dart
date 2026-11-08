@@ -2,6 +2,10 @@ part of 'reader.dart';
 
 const _readerChromeAnimationDuration = Duration(milliseconds: 140);
 
+// Native sliders can return values just below an integer page.
+@visibleForTesting
+int readerPageFromSliderValue(double value) => value.round();
+
 class _ReaderScaffold extends StatefulWidget {
   const _ReaderScaffold({required this.child});
 
@@ -733,19 +737,16 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
     }
 
     final buttons = [
-      Tooltip(
-        message: AppShortcuts.hint(
+      ReaderNightModeButton(
+        tooltip: AppShortcuts.hint(
           "Night mode".tl,
           ShortcutAction.toggleNightMode,
         ),
-        child: IconButton(
-          icon: Icon(
-            appdata.settings['readerNightMode'] == true
-                ? Icons.nightlight_round
-                : Icons.nightlight_outlined,
-          ),
-          onPressed: toggleNightMode,
-        ),
+        onPressed: toggleNightMode,
+        onChanged: () {
+          context.reader.update();
+          update();
+        },
       ),
       Tooltip(
         message: AppShortcuts.hint(
@@ -773,18 +774,34 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
             onPressed: toggleReadingOrientation,
           ),
         ),
-      Tooltip(
-        message: AppShortcuts.hint(
+      ReaderAutoPageTurningButton(
+        tooltip: AppShortcuts.hint(
           "Auto Page Turning".tl,
           ShortcutAction.toggleAutoPageTurning,
         ),
-        child: IconButton(
-          isSelected: context.reader.autoPageTurning,
-          icon: const Icon(Icons.timer_outlined),
-          selectedIcon: const Icon(Icons.timer),
-          onPressed: toggleAutoPageTurning,
-        ),
+        isSelected: context.reader.autoPageTurning,
+        readerMode: context.reader.mode.name,
+        comicId: context.reader.cid,
+        comicSource: context.reader.type.sourceKey,
+        onPressed: toggleAutoPageTurning,
+        onChanged: () {
+          context.reader._syncAutoTurn(restartCountdown: true);
+          context.reader.update();
+          update();
+        },
       ),
+      if (context.reader.mode.isGallery && context.reader.imagesPerPage > 1)
+        Tooltip(
+          message: context.reader.isPairingShifted
+              ? "Undo page shift".tl
+              : "Shift pages by one".tl,
+          child: IconButton(
+            isSelected: context.reader.isPairingShifted,
+            icon: const Icon(Icons.auto_stories_outlined),
+            selectedIcon: const Icon(Icons.auto_stories),
+            onPressed: context.reader.canShiftPairing ? shiftPairing : null,
+          ),
+        ),
       if (context.reader.widget.chapters != null)
         Tooltip(
           message: "Chapters".tl,
@@ -957,6 +974,11 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
     update();
   }
 
+  void shiftPairing() {
+    final view = context.reader._imageViewController;
+    if (view is _GalleryModeState) view.shiftPairing();
+  }
+
   void toggleAutoPageTurning() {
     final reader = context.reader;
     reader.toggleAutoPageTurning();
@@ -1046,7 +1068,7 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
       reversed: isReversed,
       divisions: (context.reader.maxPage - 1).clamp(2, 1 << 16),
       onChanged: (i) {
-        context.reader.toPage(i.toInt());
+        context.reader.toPage(readerPageFromSliderValue(i));
       },
     );
   }
@@ -1141,71 +1163,76 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
 
   void openSetting() {
     _openSideBar(
-      ReaderSettings(
-        comicId: context.reader.cid,
-        comicSource: context.reader.type.sourceKey,
-        currentPageImage: _snapshotCurrentPageImage,
-        onChanged: (key) {
-          final scopeChanged = key == 'enabled';
-          if (key == "readerMode" || scopeChanged) {
-            context.reader.mode = ReaderMode.fromKey(
-              appdata.settings.getReaderSetting(
-                context.reader.cid,
-                context.reader.type.sourceKey,
-                'readerMode',
-              ),
-            );
-          }
-          if (key == "enableTurnPageByVolumeKey" || scopeChanged) {
-            if (appdata.settings.getReaderSetting(
-              context.reader.cid,
-              context.reader.type.sourceKey,
-              'enableTurnPageByVolumeKey',
-            )) {
-              context.reader.handleVolumeEvent();
-            } else {
-              context.reader.stopVolumeEvent();
-            }
-          }
-          if (key == "quickCollectImage" || scopeChanged) {
-            addDragListener();
-          }
-          if (key == "readerKeepScreenOn" || scopeChanged) {
-            context.reader._syncScreenOn();
-          }
-          if (key == "showSystemStatusBar" || scopeChanged) {
-            final showSystemStatusBar =
+      ReaderSettingsPanel(
+        child: ReaderSettings(
+          showSearch: true,
+          comicId: context.reader.cid,
+          comicSource: context.reader.type.sourceKey,
+          currentPageImage: _snapshotCurrentPageImage,
+          onChanged: (key) {
+            final scopeChanged = key == 'enabled';
+            if (key == "readerMode" || scopeChanged) {
+              context.reader.mode = ReaderMode.fromKey(
                 appdata.settings.getReaderSetting(
                   context.reader.cid,
                   context.reader.type.sourceKey,
-                  'showSystemStatusBar',
-                ) ==
-                true;
-            applyReaderSystemUiMode(showSystemStatusBar);
-          }
-          if (key == "showChapterComments" ||
-              key == "showChapterCommentsAtEnd" || scopeChanged) {
-            update();
-          }
-          // Changing this comic's language pair or text-removal mode addresses a
-          // different translation cache generation, but the image providers are
-          // keyed on the page identity alone — without dropping them the reader
-          // would keep showing the render made with the previous settings.
-          if (key == "imageTranslationSource" ||
-              key == "imageTranslationTarget" ||
-              key == "imageTranslationInpaintMode" ||
-              key == "enableImageTranslation" || scopeChanged) {
-            PaintingBinding.instance.imageCache.clear();
-            PaintingBinding.instance.imageCache.clearLiveImages();
-          }
-          if (key == "autoPageTurningInterval" ||
-              key == "autoPageTurningMode" ||
-              key == "readerMode" ||
-              scopeChanged) {
-            context.reader._syncAutoTurn(restartCountdown: true);
-          }
-          context.reader.update();
-        },
+                  'readerMode',
+                ),
+              );
+            }
+            if (key == "enableTurnPageByVolumeKey" || scopeChanged) {
+              if (appdata.settings.getReaderSetting(
+                context.reader.cid,
+                context.reader.type.sourceKey,
+                'enableTurnPageByVolumeKey',
+              )) {
+                context.reader.handleVolumeEvent();
+              } else {
+                context.reader.stopVolumeEvent();
+              }
+            }
+            if (key == "quickCollectImage" || scopeChanged) {
+              addDragListener();
+            }
+            if (key == "readerKeepScreenOn" || scopeChanged) {
+              context.reader._syncScreenOn();
+            }
+            if (key == "showSystemStatusBar" || scopeChanged) {
+              final showSystemStatusBar =
+                  appdata.settings.getReaderSetting(
+                    context.reader.cid,
+                    context.reader.type.sourceKey,
+                    'showSystemStatusBar',
+                  ) ==
+                  true;
+              applyReaderSystemUiMode(showSystemStatusBar);
+            }
+            if (key == "showChapterComments" ||
+                key == "showChapterCommentsAtEnd" ||
+                scopeChanged) {
+              update();
+            }
+            // Changing this comic's language pair or text-removal mode addresses a
+            // different translation cache generation, but the image providers are
+            // keyed on the page identity alone — without dropping them the reader
+            // would keep showing the render made with the previous settings.
+            if (key == "imageTranslationSource" ||
+                key == "imageTranslationTarget" ||
+                key == "imageTranslationInpaintMode" ||
+                key == "enableImageTranslation" ||
+                scopeChanged) {
+              PaintingBinding.instance.imageCache.clear();
+              PaintingBinding.instance.imageCache.clearLiveImages();
+            }
+            if (key == "autoPageTurningInterval" ||
+                key == "autoPageTurningMode" ||
+                key == "readerMode" ||
+                scopeChanged) {
+              context.reader._syncAutoTurn(restartCountdown: true);
+            }
+            context.reader.update();
+          },
+        ),
       ),
       width: 400,
     );
