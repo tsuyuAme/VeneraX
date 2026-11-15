@@ -86,6 +86,12 @@ class _App {
 
   GlobalKey<NavigatorState>? mainNavigatorKey;
 
+  /// Nested tab navigators (Search tab). Used when [secondaryNavigatorActive].
+  GlobalKey<NavigatorState>? secondaryNavigatorKey;
+
+  /// True while the Search tab (owner of [secondaryNavigatorKey]) is visible.
+  bool secondaryNavigatorActive = false;
+
   BuildContext get rootContext => rootNavigatorKey.currentContext!;
 
   final Appdata data = appdata;
@@ -107,10 +113,29 @@ class _App {
   /// Desktop Esc and mouse back. [NavigatorState.maybePop] lets a page's
   /// PopScope or nested navigator step back one level instead of closing it.
   void pop() {
+    // Root overlays (sidebars, dialogs) first.
     if (rootNavigatorKey.currentState?.canPop() ?? false) {
       rootNavigatorKey.currentState?.maybePop();
-    } else if (mainNavigatorKey?.currentState?.canPop() ?? false) {
+      return;
+    }
+    // Main shell routes (settings, pages pushed without tab context).
+    if (mainNavigatorKey?.currentState?.canPop() ?? false) {
       mainNavigatorKey?.currentState?.maybePop();
+      return;
+    }
+    // Search nested stack while that tab is selected.
+    if (secondaryNavigatorActive &&
+        (secondaryNavigatorKey?.currentState?.canPop() ?? false)) {
+      secondaryNavigatorKey!.currentState!.maybePop();
+    }
+  }
+
+  /// Close every route above the shell on the root navigator (comment sidebars…).
+  void closeRootOverlays() {
+    final nav = rootNavigatorKey.currentState;
+    if (nav == null) return;
+    while (nav.canPop()) {
+      nav.pop();
     }
   }
 

@@ -24,6 +24,11 @@ class HomeSectionMeta {
 /// missing from a stored/synced config to the end, visible by default.
 const List<HomeSectionMeta> kHomeSections = [
   HomeSectionMeta('history', 'History', Icons.history),
+  HomeSectionMeta(
+    'artistFavorites',
+    'Favorite authors',
+    Icons.person_outline,
+  ),
   HomeSectionMeta('readLater', 'Read Later', Icons.watch_later_outlined),
   HomeSectionMeta('translatedComics', 'Translation Library', Icons.translate),
   HomeSectionMeta('local', 'Local', Icons.local_library_outlined),

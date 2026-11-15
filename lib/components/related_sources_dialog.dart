@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
@@ -755,14 +756,22 @@ void _showRelatedComicPreview({
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        title.replaceAll('\n', ' '),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: ts.s18.bold,
+                      Builder(
+                        builder: (titleCtx) {
+                          final fullTitle = title.replaceAll('\n', ' ');
+                          return Tooltip(
+                            message: fullTitle,
+                            waitDuration: const Duration(milliseconds: 400),
+                            child: SelectableText(
+                              fullTitle,
+                              maxLines: 3,
+                              style: ts.s18.bold,
+                            ),
+                          );
+                        },
                       ),
                       const SizedBox(height: 6),
-                      Text(
+                      SelectableText(
                         [
                           sourceName,
                           if (cleanAuthor != null && cleanAuthor.isNotEmpty)
@@ -773,6 +782,26 @@ void _showRelatedComicPreview({
                         style: TextStyle(
                           fontSize: 13,
                           color: context.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton.icon(
+                          style: TextButton.styleFrom(
+                            padding: EdgeInsets.zero,
+                            minimumSize: const Size(0, 32),
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          icon: const Icon(Icons.copy, size: 16),
+                          label: Text('Copy Title'.tl),
+                          onPressed: () {
+                            Clipboard.setData(
+                              ClipboardData(
+                                text: title.replaceAll('\n', ' '),
+                              ),
+                            );
+                            context.showMessage(message: 'Copied'.tl);
+                          },
                         ),
                       ),
                       if (tags != null && tags.isNotEmpty) ...[
@@ -792,10 +821,9 @@ void _showRelatedComicPreview({
                       if (cleanDescription != null &&
                           cleanDescription.isNotEmpty) ...[
                         const SizedBox(height: 8),
-                        Text(
+                        SelectableText(
                           cleanDescription,
-                          maxLines: 4,
-                          overflow: TextOverflow.ellipsis,
+                          maxLines: 6,
                         ),
                       ],
                     ],
