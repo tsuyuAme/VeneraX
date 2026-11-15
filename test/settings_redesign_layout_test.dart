@@ -42,14 +42,14 @@ const _sections = <int, List<String>>{
     'E-ink screen',
   ],
   2: ['Sorting and placement', 'Library maintenance'],
-  3: ['Import, export & history', 'Sync preferences'],
+  3: ['Data import & export', 'Sync preferences'],
   4: [
     'Card details',
+    'Reading history',
     'Search preferences',
     'Browsing pages',
     'Content filters',
   ],
-  7: ['Diagnostics'],
   8: ['Advanced translation settings', 'Help & cleanup'],
   9: ['Storage locations'],
 };
@@ -348,7 +348,7 @@ void main() {
     );
   }
 
-  for (final (category, title) in [(7, 'Diagnostics'), (1, 'E-ink screen')]) {
+  for (final (category, title) in [(1, 'E-ink screen')]) {
     testWidgets(
       'wide $title entry fills its entire final row',
       (tester) async {

@@ -60,6 +60,8 @@ const syncSkipCategories = <SyncSkipCategory>[
     "Reader mode, page turning, image enhancement and per-comic reader settings",
     [
       "readerMode",
+      "adaptiveReading",
+      "adaptivePagedMode",
       "enableContinuousChapterReading",
       "readerScreenPicNumberForLandscape",
       "readerScreenPicNumberForPortrait",
@@ -152,6 +154,7 @@ const syncSkipCategories = <SyncSkipCategory>[
       "searchSources",
       "defaultSearchTarget",
       "autoAddLanguageFilter",
+      "languageFilterSources",
       "blockedWords",
       "blockedTags",
       "blockedCommentWords",
@@ -241,6 +244,8 @@ const syncSkipCategories = <SyncSkipCategory>[
       "checkUpdateOnStart",
       "minimizeToTray",
       "autoCleanHistoryDays",
+      "clearReadingProgressOnSingleHistoryDelete",
+      "onClickLocalComic",
     ],
   ),
 ];

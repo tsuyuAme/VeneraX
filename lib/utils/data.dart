@@ -9,6 +9,7 @@ import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_collection_store.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_source/source_library.dart';
+import 'package:venera/foundation/comic_state_repository.dart';
 import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/domain_database.dart';
 import 'package:venera/foundation/favorites.dart';
@@ -344,7 +345,14 @@ Future<File> exportAppData({
   var translationPrefsBytes = includeTranslations
       ? _translationPrefsBytes()
       : null;
-  await Isolate.run(() {
+  // Without every store ready to say what is kept, the domain database goes
+  // in whole, as it always did.
+  var keptComicIds = coreDataStoresReady ? _keptDomainComicIds() : null;
+  var domainSnapshot = FilePath.join(App.cachePath, 'domain_$time.db');
+  String? snapshotError;
+  try {
+  snapshotError = await Isolate.run(() {
+    String? error;
     var zipFile = ZipFile.open(cacheFilePath);
     var coverDirName = ComicCollectionStore.coverDirName;
     var historyFile = FilePath.join(dataPath, "history.db");
@@ -375,7 +383,20 @@ Future<File> exportAppData({
       zipFile.addFile("image_translation.db", translationStoreFile);
     }
     if (File(domainFile).existsSync()) {
-      zipFile.addFile("data/venera.db", domainFile);
+      var domainEntry = domainFile;
+      if (keptComicIds != null) {
+        try {
+          DomainDatabase.writeSyncSnapshot(
+            sourcePath: domainFile,
+            targetPath: domainSnapshot,
+            keptComicIds: keptComicIds,
+          );
+          domainEntry = domainSnapshot;
+        } catch (e) {
+          error = e.toString();
+        }
+      }
+      zipFile.addFile("data/venera.db", domainEntry);
     }
     var readLaterFile = FilePath.join(dataPath, "read_later.db");
     if (File(readLaterFile).existsSync()) {
@@ -409,9 +430,37 @@ Future<File> exportAppData({
       }
     }
     zipFile.close();
+    return error;
   });
+  } finally {
+    await File(domainSnapshot).deleteIgnoreError();
+  }
+  if (snapshotError != null) {
+    Log.warning('Export Data', 'Packed the whole domain database: $snapshotError');
+  }
   });
   return cacheFile;
+}
+
+/// Domain comics a backup carries: every comic kept, read or timed here.
+/// The rest of the domain database is this device's browsing cache.
+Set<String> _keptDomainComicIds() {
+  const repository = ComicStateRepository();
+  String domainId(String sourceKey, String comicId) =>
+      repository.identityFor(sourceKey, comicId).comicId;
+  return {
+    for (final comic in HistoryManager().recordedComics())
+      domainId(comic.type.sourceKey, comic.id),
+    for (final comic in LocalFavoritesManager().getAllComics())
+      domainId(comic.sourceKey, comic.id),
+    for (final comic in LocalManager().getComics(LocalSortType.name))
+      domainId(comic.sourceKey, comic.id),
+    for (final comic in App.readLater.getAll())
+      domainId(comic.sourceKey, comic.id),
+    for (final collection in ComicCollectionStore.all())
+      for (final member in collection.members)
+        domainId(member.sourceKey, member.comicId),
+  };
 }
 
 /// Per-comic image-translation state (enable switch, learned language lock,
@@ -557,6 +606,8 @@ class ImportOutcome {
 /// marks an import the user asked for (not a background sync): its translations
 /// outrank deletions recorded on this device. A file from [exportTranslations]
 /// is recognized and only merged, whatever the flags.
+/// [restoreWebdavConfig] is false during setup: importing local data must not
+/// silently connect this device to a server from the backup.
 Future<ImportOutcome> importAppData(
   File file, {
   bool checkVersion = false,
@@ -565,6 +616,7 @@ Future<ImportOutcome> importAppData(
   bool restoreLocalComics = true,
   bool mergeTranslations = true,
   bool userRestore = false,
+  bool restoreWebdavConfig = true,
 }) async {
   while (_importInProgress != null) {
     // Wait for the other import to fully finish (ignore its outcome).
@@ -581,6 +633,7 @@ Future<ImportOutcome> importAppData(
       restoreLocalComics: restoreLocalComics,
       mergeTranslations: mergeTranslations,
       userRestore: userRestore,
+      restoreWebdavConfig: restoreWebdavConfig,
     );
   } finally {
     _importInProgress = null;
@@ -666,6 +719,7 @@ Future<ImportOutcome> _importAppDataLocked(
   bool restoreLocalComics = true,
   bool mergeTranslations = true,
   bool userRestore = false,
+  bool restoreWebdavConfig = true,
 }) async {
   void report(ImportPhase phase, [String? message, int? bytes]) {
     onProgress?.call(phase, message, bytes);
@@ -745,7 +799,7 @@ Future<ImportOutcome> _importAppDataLocked(
       // Refresh collection-backed pages immediately after a WebDAV restore;
       // collection settings, including detail display modes, live in appdata.
       ComicCollectionStore.notifyChanged();
-      if (data is Map<String, dynamic>) {
+      if (restoreWebdavConfig && data is Map<String, dynamic>) {
         await _restoreWebdavConfigIfAbsent(data);
       }
       // Which library each source installs and updates from rides along in the
@@ -778,6 +832,7 @@ Future<ImportOutcome> _importAppDataLocked(
             // PUT; a restored backup must not forge or erase it.
             'webdavPendingPublish',
             'hasCompletedInitialSync',
+            'webdavSetupRestorePending',
             'sync_logs',
             'data_sync_tasks',
             'follow_update_active_tasks',

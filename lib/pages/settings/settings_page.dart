@@ -7,8 +7,11 @@ import 'package:flutter_reorderable_grid_view/widgets/reorderable_builder.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 import 'package:uuid/uuid.dart';
 import 'package:venera/components/components.dart';
+import 'package:venera/components/app_update_dialog.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
+import 'package:venera/foundation/app_update.dart';
+import 'package:venera/foundation/guide_document.dart';
 import 'package:venera/foundation/auto_page_turning.dart';
 import 'package:venera/foundation/battery_optimization.dart';
 import 'package:venera/foundation/cache_manager.dart';
@@ -36,6 +39,7 @@ import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/shortcuts.dart';
 import 'package:venera/foundation/tray.dart';
 import 'package:venera/network/app_dio.dart';
+import 'package:venera/network/app_update_download.dart';
 import 'package:venera/pages/app_lock_setup.dart';
 import 'package:venera/pages/comic_source_page.dart';
 import 'package:venera/pages/follow_updates_page.dart';
@@ -71,6 +75,7 @@ part 'cache_directory_settings.dart';
 part 'about.dart';
 part 'network.dart';
 part 'debug.dart';
+part 'logs_page.dart';
 part 'settings_search.dart';
 part 'settings_scope.dart';
 part 'settings_focus.dart';
@@ -186,19 +191,37 @@ class _SettingsPageState extends State<SettingsPage> {
                   color: colors.outlineVariant,
                 ),
                 Expanded(
-                  child: Column(
-                    children: [
-                      SafeArea(bottom: false, child: buildSearchField()),
-                      Expanded(
-                        child: _searchQuery.trim().isEmpty
-                            ? buildRight()
-                            : _buildSettingsSearchResults(
-                                context,
-                                _searchQuery,
-                                _openSettingsResult,
-                              ),
-                      ),
-                    ],
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final width =
+                          constraints.maxWidth -
+                          MediaQuery.paddingOf(context).horizontal;
+                      final background = width >= 700
+                          ? colors.surface
+                          : colors.surfaceContainerLow;
+                      return Theme(
+                        data: Theme.of(context).copyWith(
+                          canvasColor: background,
+                          scaffoldBackgroundColor: background,
+                          appBarTheme: Theme.of(
+                            context,
+                          ).appBarTheme.copyWith(backgroundColor: background),
+                        ),
+                        child: Material(
+                          color: background,
+                          child: SafeArea(
+                            bottom: false,
+                            child: _searchQuery.trim().isEmpty
+                                ? buildRight()
+                                : _buildSettingsSearchResults(
+                                    context,
+                                    _searchQuery,
+                                    _openSettingsResult,
+                                  ),
+                          ),
+                        ),
+                      );
+                    },
                   ),
                 ),
               ],
@@ -209,10 +232,10 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Widget buildSearchField() => Padding(
     padding: EdgeInsets.fromLTRB(
-      enableTwoViews ? 32 : 20,
-      enableTwoViews ? 12 : 4,
-      enableTwoViews ? 32 : 20,
-      enableTwoViews ? 12 : 0,
+      enableTwoViews ? 12 : 20,
+      4,
+      enableTwoViews ? 12 : 20,
+      0,
     ),
     child: TextField(
       controller: _searchController,
@@ -223,9 +246,7 @@ class _SettingsPageState extends State<SettingsPage> {
         hintText: 'Search settings'.tl,
         prefixIcon: const Icon(Icons.search, size: 20),
         filled: true,
-        fillColor: enableTwoViews
-            ? colors.surfaceContainerLow
-            : colors.surfaceContainerHighest,
+        fillColor: colors.surfaceContainerHighest,
         isDense: true,
         contentPadding: const EdgeInsets.symmetric(
           horizontal: 14,
@@ -233,7 +254,9 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(10),
-          borderSide: BorderSide.none,
+          borderSide: enableTwoViews
+              ? BorderSide(color: colors.outlineVariant)
+              : BorderSide.none,
         ),
         suffixIcon: _searchQuery.isEmpty
             ? null
@@ -283,7 +306,7 @@ class _SettingsPageState extends State<SettingsPage> {
               ],
             ),
           ),
-          if (!enableTwoViews) buildSearchField(),
+          buildSearchField(),
           Expanded(
             child: !enableTwoViews && _searchQuery.trim().isNotEmpty
                 ? _buildSettingsSearchResults(
@@ -427,18 +450,36 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  Widget buildRight() => Navigator(
-    key: ValueKey('$currentPage:$_destinationVersion'),
-    onGenerateRoute: (settings) => PageRouteBuilder(
-      pageBuilder: (context, animation, secondaryAnimation) =>
-          _SettingsDetailPage(
-            pageIndex: currentPage,
-            focusTitle: _focusTitle,
-            fallbackTitle: _focusFallback,
-          ),
-      transitionDuration: Duration.zero,
-    ),
-  );
+  // A fresh key per destination still restarts the pane's stack on a category
+  // switch, while letting back reach the pages pushed into it.
+  var _rightNavigator = GlobalKey<NavigatorState>();
+  var _rightDestination = '';
+
+  Widget buildRight() {
+    final destination = '$currentPage:$_destinationVersion';
+    if (destination != _rightDestination) {
+      _rightDestination = destination;
+      _rightNavigator = GlobalKey<NavigatorState>();
+    }
+    return NavigatorPopHandler(
+      // Esc steps back one page. Android's back gesture is left as it was:
+      // nested navigators there risk a double pop (#101).
+      enabled: App.isDesktop,
+      onPopWithResult: (_) => _rightNavigator.currentState?.maybePop(),
+      child: Navigator(
+        key: _rightNavigator,
+        onGenerateRoute: (settings) => PageRouteBuilder(
+          pageBuilder: (context, animation, secondaryAnimation) =>
+              _SettingsDetailPage(
+                pageIndex: currentPage,
+                focusTitle: _focusTitle,
+                fallbackTitle: _focusFallback,
+              ),
+          transitionDuration: Duration.zero,
+        ),
+      ),
+    );
+  }
 }
 
 class _SettingsDetailPage extends StatelessWidget {

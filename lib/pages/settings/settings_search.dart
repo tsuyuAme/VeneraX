@@ -37,6 +37,7 @@ class _SettingsSearchEntry {
       title == 'Custom translation script' ? 'LLM providers' : title;
 
   String? get fallbackTitle => switch (title) {
+    'Paged comic reading mode' => 'Adaptive reading mode',
     'Night mode color' || 'Night mode intensity' => 'Night mode',
     'Long press zoom position' => 'Long press to zoom',
     'Custom tap-to-turn zones' => 'Page turn mode',
@@ -175,10 +176,9 @@ class _SettingsSearchEntry {
         'Sync Local Comics' ||
         'Skip Sync Items' ||
         'Use Proxy for Sync' => 'Sync preferences',
-        'Auto clean reading history' ||
         'Export App Data' ||
         'Export Translation Results' ||
-        'Import App Data' => 'Import, export & history',
+        'Import App Data' => 'Data import & export',
         _ => 'Data management',
       };
     }
@@ -190,8 +190,12 @@ class _SettingsSearchEntry {
         'Show read later status on comic tile' ||
         'Show collection status on comic tile' ||
         'Show page count on comic tile' => 'Card details',
+        'Auto clean reading history' ||
+        'Clear reading progress when deleting a single history entry' =>
+          'Reading history',
         'Default Search Target' ||
         'Auto Language Filters' ||
+        'Language Filter Sources' ||
         'Search Sources' => 'Search preferences',
         'Explore Pages' ||
         'Category Pages' ||
@@ -204,12 +208,12 @@ class _SettingsSearchEntry {
       };
     }
     if (category == 5) return 'Connection';
-    if (category == 6) return 'Diagnostics';
+    if (category == 6) return 'Debug';
     if (category == 7) {
       return switch (title) {
         'Check for updates' ||
         'Check for updates on startup' => 'Version and updates',
-        'Debug' => 'Diagnostics',
+        'App logs' => 'Diagnostics & debugging',
         _ => 'Help',
       };
     }
@@ -233,6 +237,7 @@ class _SettingsSearchEntry {
     }
     if (category == 9) {
       return switch (title) {
+        'Click local comic' ||
         'Download Threads' ||
         'Parallel Downloads' ||
         'Download on WiFi Only' => 'Downloads',
@@ -264,6 +269,7 @@ class _SettingsSearchEntry {
       'Connection',
       'Version and updates',
       'Help',
+      'Diagnostics & debugging',
       'Translation preferences',
       'Translation services',
       'Models & languages',
@@ -284,6 +290,12 @@ class _SettingsSearchEntry {
 /// time so this is safe to construct before [App] is initialized.
 final _settingsSearchIndex = <_SettingsSearchEntry>[
   // --- 4: Explore ---
+  _SettingsSearchEntry(
+    'Clear reading progress when deleting a single history entry',
+    4,
+    keywords: ['history', 'delete', 'progress', 'read'],
+  ),
+  _SettingsSearchEntry("Auto clean reading history", 4),
   _SettingsSearchEntry("Display mode of comic tile", 4),
   _SettingsSearchEntry("Size of comic tile", 4),
   _SettingsSearchEntry("Explore Pages", 4),
@@ -301,6 +313,11 @@ final _settingsSearchIndex = <_SettingsSearchEntry>[
   _SettingsSearchEntry("Comment keyword blocking", 4, keywords: ["block"]),
   _SettingsSearchEntry("Default Search Target", 4, keywords: ["search"]),
   _SettingsSearchEntry("Auto Language Filters", 4, keywords: ["language"]),
+  _SettingsSearchEntry(
+    "Language Filter Sources",
+    4,
+    keywords: ["language", "source"],
+  ),
   _SettingsSearchEntry("Initial Page", 4),
   _SettingsSearchEntry("Display mode of comic list", 4),
   _SettingsSearchEntry("Comic Source", 4, keywords: ["source", "extension"]),
@@ -319,6 +336,12 @@ final _settingsSearchIndex = <_SettingsSearchEntry>[
   _SettingsSearchEntry("Page turn mode", 1, keywords: ["tap"]),
   _SettingsSearchEntry("Page animation", 1),
   _SettingsSearchEntry("Reading mode", 1, keywords: ["gallery", "continuous"]),
+  _SettingsSearchEntry(
+    'Adaptive reading mode',
+    1,
+    keywords: ['automatic', 'layout', 'strip', 'webtoon', '自适应', '条漫', '頁漫'],
+  ),
+  _SettingsSearchEntry('Paged comic reading mode', 1),
   _SettingsSearchEntry("Seamless chapter reading", 1),
   _SettingsSearchEntry(
     "The number of pic in screen for landscape (Only Gallery Mode)",
@@ -365,7 +388,7 @@ final _settingsSearchIndex = <_SettingsSearchEntry>[
     "Turn page by volume keys",
     1,
     keywords: ["volume", "gesture"],
-    visible: () => App.isAndroid,
+    visible: () => App.isAndroid || App.isOhos,
   ),
   _SettingsSearchEntry("Also collect chapter cover when collecting image", 1),
   _SettingsSearchEntry("Quick collect image", 1),
@@ -504,6 +527,11 @@ final _settingsSearchIndex = <_SettingsSearchEntry>[
   ),
 
   // --- 9: Downloads & storage ---
+  _SettingsSearchEntry(
+    "Click local comic",
+    9,
+    keywords: ["local", "read", "detail", "open"],
+  ),
   _SettingsSearchEntry("Storage Path for local comics", 9, keywords: ["path"]),
   _SettingsSearchEntry("Set New Storage Path", 9, keywords: ["path"]),
   _SettingsSearchEntry("Cache Size", 9, keywords: ["cache"]),
@@ -519,7 +547,6 @@ final _settingsSearchIndex = <_SettingsSearchEntry>[
   ),
 
   // --- 3: Sync & backup ---
-  _SettingsSearchEntry("Auto clean reading history", 3),
   _SettingsSearchEntry("Export App Data", 3, keywords: ["backup", "export"]),
   _SettingsSearchEntry(
     "Export Translation Results",
@@ -609,10 +636,14 @@ final _settingsSearchIndex = <_SettingsSearchEntry>[
   ),
   _SettingsSearchEntry("Repository", 7, keywords: ["github", "source"]),
   _SettingsSearchEntry("User Agreement & Disclaimer", 7),
+  _SettingsSearchEntry(
+    "App logs",
+    7,
+    keywords: ["log", "logs", "crash", "error", "diagnostics"],
+  ),
 
   // --- 6: Debug ---
   _SettingsSearchEntry("Reload Configs", 6),
-  _SettingsSearchEntry("Open Log", 6, keywords: ["log", "logs"]),
   _SettingsSearchEntry(
     "Ignore Certificate Errors",
     6,

@@ -2,12 +2,14 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/image_translation/rate_limiter.dart';
 import 'package:venera/foundation/js_engine.dart';
 import 'package:venera/foundation/consts.dart';
 import 'package:venera/utils/translations.dart';
+import 'package:venera/utils/file_type.dart';
 import 'package:venera/utils/image.dart';
 import 'package:venera/foundation/image_provider/avif_fallback.dart';
 
@@ -15,7 +17,49 @@ import 'app_dio.dart';
 
 const _imageStreamIdleTimeout = Duration(seconds: 30);
 
+/// rhttp only bounds connection setup, so a server that accepts the connection
+/// but never answers would hang the request forever. Bound the header wait;
+/// the body is bounded separately by [_imageStreamIdleTimeout].
+const _imageResponseHeaderTimeout = Duration(seconds: 30);
+
+@visibleForTesting
+Future<Response<ResponseBody>> requestImageWithHeaderTimeout(
+  AppDio dio,
+  String url, {
+  Object? data,
+  Duration headerTimeout = _imageResponseHeaderTimeout,
+}) async {
+  final cancelToken = CancelToken();
+  var timedOut = false;
+  final timer = Timer(headerTimeout, () {
+    timedOut = true;
+    cancelToken.cancel();
+  });
+  try {
+    return await dio.request<ResponseBody>(
+      url,
+      data: data,
+      cancelToken: cancelToken,
+    );
+  } on DioException catch (e) {
+    if (timedOut && e.type == DioExceptionType.cancel) {
+      throw TimeoutException("No response from server", headerTimeout);
+    }
+    rethrow;
+  } finally {
+    timer.cancel();
+  }
+}
+
+/// Whether [data] can be stored as a downloaded page. A source may answer 200
+/// with an HTML error page or a truncated body.
+bool isValidDownloadedImage(Uint8List data) {
+  return data.length >= 100 && detectFileType(data).mime.startsWith('image/');
+}
+
 abstract class ImageDownloader {
+  static const thumbnailCacheDuration = Duration(days: 90);
+
   /// Disk cache key for a thumbnail/cover. Callers that may need to evict a
   /// corrupted entry must build the key through this, not by hand: a key that
   /// differs from the one used to write makes eviction a no-op, and bad bytes
@@ -62,7 +106,10 @@ abstract class ImageDownloader {
     }
 
     final cacheKey = thumbnailCacheKey(url, sourceKey, cid);
-    final cache = await CacheManager().findCache(cacheKey);
+    final cache = await CacheManager().findCache(
+      cacheKey,
+      thumbnailCacheDuration.inMilliseconds,
+    );
 
     if (cache != null) {
       var data = await cache.readAsBytes();
@@ -71,6 +118,7 @@ abstract class ImageDownloader {
         totalBytes: data.length,
         imageBytes: data,
       );
+      return;
     }
 
     var configs = <String, dynamic>{};
@@ -107,7 +155,8 @@ abstract class ImageDownloader {
     if (requestUrl.startsWith('//')) {
       requestUrl = 'https:$requestUrl';
     }
-    var req = await dio.request<ResponseBody>(
+    var req = await requestImageWithHeaderTimeout(
+      dio,
       requestUrl,
       data: configs['data'],
     );
@@ -144,7 +193,11 @@ abstract class ImageDownloader {
       (configs['onResponse'] as JSInvokable).free();
     }
 
-    await CacheManager().writeCache(cacheKey, buffer);
+    await CacheManager().writeCache(
+      cacheKey,
+      buffer,
+      thumbnailCacheDuration.inMilliseconds,
+    );
     yield ImageDownloadProgress(
       currentBytes: buffer.length,
       totalBytes: buffer.length,
@@ -213,15 +266,21 @@ abstract class ImageDownloader {
 
     if (cache != null) {
       var data = await cache.readAsBytes();
-      yield ImageDownloadProgress(
-        currentBytes: data.length,
-        totalBytes: data.length,
-        imageBytes: data,
-      );
-      // A download reuses an already-cached image instead of re-fetching it,
-      // and never re-caches (avoids double-writing the bytes to disk and
-      // evicting the reader's prefetch cache) — see #4 / #17.
-      if (forDownload) return;
+      if (forDownload && !isValidDownloadedImage(data)) {
+        // A poisoned entry (e.g. a cached HTML error page) would otherwise be
+        // served to every download retry. Drop it and fetch from the network.
+        await CacheManager().delete(cacheKey);
+      } else {
+        yield ImageDownloadProgress(
+          currentBytes: data.length,
+          totalBytes: data.length,
+          imageBytes: data,
+        );
+        // A download reuses an already-cached image instead of re-fetching it,
+        // and never re-caches (avoids double-writing the bytes to disk and
+        // evicting the reader's prefetch cache) — see #4 / #17.
+        if (forDownload) return;
+      }
     }
 
     Future<Map<String, dynamic>?> Function()? onLoadFailed;
@@ -262,7 +321,8 @@ abstract class ImageDownloader {
           ),
         );
 
-        var req = await dio.request<ResponseBody>(
+        var req = await requestImageWithHeaderTimeout(
+          dio,
           configs['url'] ?? imageKey,
           data: configs['data'],
         );

@@ -399,201 +399,6 @@ class _BatteryOptimizationSettingState
   }
 }
 
-class LogsPage extends StatefulWidget {
-  const LogsPage({super.key});
-
-  @override
-  State<LogsPage> createState() => _LogsPageState();
-}
-
-class _LogsPageState extends State<LogsPage> {
-  String logLevelToShow = "all";
-
-  @override
-  Widget build(BuildContext context) {
-    var logToShow = logLevelToShow == "all"
-        ? Log.logs
-        : Log.logs.where((log) => log.level.name == logLevelToShow).toList();
-    return Scaffold(
-      appBar: Appbar(
-        title: Text("Logs".tl),
-        actions: [
-          IconButton(
-            onPressed: () => setState(() {
-              final RelativeRect position = RelativeRect.fromLTRB(
-                MediaQuery.of(context).size.width,
-                MediaQuery.of(context).padding.top + kToolbarHeight,
-                0.0,
-                0.0,
-              );
-              showMenu(
-                context: context,
-                position: position,
-                items: [
-                  PopupMenuItem(
-                    child: Text("all"),
-                    onTap: () => setState(() => logLevelToShow = "all"),
-                  ),
-                  PopupMenuItem(
-                    child: Text("info"),
-                    onTap: () => setState(() => logLevelToShow = "info"),
-                  ),
-                  PopupMenuItem(
-                    child: Text("warning"),
-                    onTap: () => setState(() => logLevelToShow = "warning"),
-                  ),
-                  PopupMenuItem(
-                    child: Text("error"),
-                    onTap: () => setState(() => logLevelToShow = "error"),
-                  ),
-                ],
-              );
-            }),
-            icon: const Icon(Icons.filter_alt_outlined),
-          ),
-          IconButton(
-            onPressed: () => setState(() {
-              final RelativeRect position = RelativeRect.fromLTRB(
-                MediaQuery.of(context).size.width,
-                MediaQuery.of(context).padding.top + kToolbarHeight,
-                0.0,
-                0.0,
-              );
-              showMenu(
-                context: context,
-                position: position,
-                items: [
-                  PopupMenuItem(
-                    child: Text("Clear".tl),
-                    onTap: () => setState(() => Log.clear()),
-                  ),
-                  PopupMenuItem(
-                    child: Text("Disable Length Limitation".tl),
-                    onTap: () {
-                      Log.ignoreLimitation = true;
-                      context.showMessage(
-                        message: "Only valid for this run".tl,
-                      );
-                    },
-                  ),
-                  PopupMenuItem(
-                    child: Text(
-                      Log.verboseNetwork
-                          ? "Stop Logging All Requests".tl
-                          : "Log All Network Requests".tl,
-                    ),
-                    onTap: () {
-                      var enable = !Log.verboseNetwork;
-                      appdata.settings['verboseNetworkLog'] = enable;
-                      Log.syncVerboseNetwork(enable);
-                      appdata.saveData();
-                      context.showMessage(
-                        message: enable
-                            ? "Recording every request. This uses more battery; turn it off when done."
-                                  .tl
-                            : "Only failed requests are recorded now.".tl,
-                      );
-                    },
-                  ),
-                  PopupMenuItem(
-                    child: Text("Export".tl),
-                    onTap: () {
-                      // Buffered lines would otherwise be missing from the file.
-                      Log.flush();
-                      saveLog(Log().toString());
-                    },
-                  ),
-                ],
-              );
-            }),
-            icon: const Icon(Icons.more_horiz),
-          ),
-        ],
-      ),
-      body: ListView.builder(
-        reverse: true,
-        controller: ScrollController(),
-        itemCount: logToShow.length,
-        itemBuilder: (context, index) {
-          index = logToShow.length - index - 1;
-          return Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-            child: SelectionArea(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Container(
-                        decoration: BoxDecoration(
-                          color: Theme.of(
-                            context,
-                          ).colorScheme.surfaceContainerHighest,
-                          borderRadius: const BorderRadius.all(
-                            Radius.circular(16),
-                          ),
-                        ),
-                        child: Padding(
-                          padding: const EdgeInsets.fromLTRB(5, 0, 5, 1),
-                          child: Text(logToShow[index].title),
-                        ),
-                      ),
-                      const SizedBox(width: 3),
-                      Container(
-                        decoration: BoxDecoration(
-                          color: [
-                            Theme.of(context).colorScheme.error,
-                            Theme.of(context).colorScheme.errorContainer,
-                            Theme.of(context).colorScheme.primaryContainer,
-                          ][logToShow[index].level.index],
-                          borderRadius: const BorderRadius.all(
-                            Radius.circular(16),
-                          ),
-                        ),
-                        child: Padding(
-                          padding: const EdgeInsets.fromLTRB(5, 0, 5, 1),
-                          child: Text(
-                            logToShow[index].level.name,
-                            style: TextStyle(
-                              color: logToShow[index].level.index == 0
-                                  ? Colors.white
-                                  : Colors.black,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  Text(logToShow[index].content),
-                  Text(
-                    logToShow[index].time.toString().replaceAll(
-                      RegExp(r"\.\w+"),
-                      "",
-                    ),
-                  ),
-                  TextButton(
-                    onPressed: () {
-                      Clipboard.setData(
-                        ClipboardData(text: logToShow[index].content),
-                      );
-                    },
-                    child: Text("Copy".tl),
-                  ),
-                  const Divider(),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  void saveLog(String log) async {
-    saveFile(data: utf8.encode(log), filename: 'log.txt');
-  }
-}
-
 class _WebdavSetting extends StatefulWidget {
   const _WebdavSetting();
 
@@ -611,7 +416,7 @@ class _WebdavSettingState extends State<_WebdavSetting> {
 
   bool syncLocalComicImages = false;
 
-  bool isTesting = false;
+  bool isSaving = false;
 
   bool isTestingConnection = false;
 
@@ -714,61 +519,46 @@ class _WebdavSettingState extends State<_WebdavSetting> {
     await _saveConfig();
   }
 
-  /// Persists the WebDAV config the form currently holds, then runs a
-  /// best-effort initial sync (unless the tier is manual). Pops the settings
-  /// page when done. Shared by the Save button and the QR-scan handler.
+  /// Persists the config, then starts one initial sync outside the form.
   Future<void> _saveConfig() async {
-    if (url.trim().isEmpty && user.trim().isEmpty && pass.trim().isEmpty) {
-      appdata.settings['webdav'] = [];
-      // Persist the tier the form holds (it may come from a QR scan that is
-      // only applied on Save). With no config the tier stays inert —
-      // everything gates on isConfigured — and activates once a config is
-      // added (#67 semantics).
-      DataSync().setSyncMode(syncMode);
-      appdata.saveData();
-      context.showMessage(message: "Saved".tl);
-      App.rootPop();
-      return;
-    }
-
-    final config = [url.trim(), user.trim(), pass];
+    if (isSaving) return;
+    setState(() => isSaving = true);
+    final previousConfig = appdata.settings['webdav'];
+    final previousDisabledFields = appdata.settings['disableSyncFields'];
+    final mode = syncMode;
+    final config = url.trim().isEmpty && user.trim().isEmpty && pass.trim().isEmpty
+        ? <String>[]
+        : [url.trim(), user.trim(), pass];
     appdata.settings['webdav'] = config;
     appdata.settings['disableSyncFields'] = disableSync;
-    DataSync().setSyncMode(syncMode);
-
-    // Persisting the configuration always succeeds at this point. The initial
-    // sync below is best-effort: its result is only surfaced as a hint and
-    // never rolls the config back.
-    appdata.saveData();
-
-    if (syncMode == WebdavSyncMode.manual) {
-      // No automatic uploads wanted; skip the immediate test sync too — the
-      // user triggers everything by hand.
-      context.showMessage(message: "Saved".tl);
-      App.rootPop();
+    try {
+      // The explicit sync below owns this save; no second debounced upload.
+      await appdata.saveData(false);
+    } catch (e, s) {
+      appdata.settings['webdav'] = previousConfig;
+      appdata.settings['disableSyncFields'] = previousDisabledFields;
+      Log.error('Save WebDAV config', e, s);
+      if (mounted) {
+        setState(() => isSaving = false);
+        context.showMessage(message: '${"Error".tl}: $e');
+      }
       return;
     }
-
-    setState(() {
-      isTesting = true;
-    });
-    // Use syncData() instead of uploadData() so a fresh install with no local
-    // data downloads the remote backup instead of being blocked by the
-    // empty-data upload guards.
-    var syncResult = await DataSync().syncData();
-    if (!mounted) return;
-    setState(() {
-      isTesting = false;
-    });
-    if (syncResult.error) {
-      context.showMessage(
-        message: "Saved, but sync failed: @error".tlParams({
-          "error": syncResult.errorMessage ?? "",
-        }),
+    final sync = DataSync();
+    sync.setSyncMode(mode, settle: false);
+    if (config.isNotEmpty && mode != WebdavSyncMode.manual) {
+      // Progress and failures remain available in the sync status/task UI.
+      unawaited(
+        sync.syncData().then<void>(
+          (_) {},
+          onError: (Object e, StackTrace s) {
+            Log.error('Data Sync', e, s);
+          },
+        ),
       );
-    } else {
-      context.showMessage(message: "Saved".tl);
     }
+    if (!mounted) return;
+    context.showMessage(message: "Saved".tl);
     App.rootPop();
   }
 
@@ -896,7 +686,7 @@ class _WebdavSettingState extends State<_WebdavSetting> {
                     ),
                   ),
                 ),
-                if (App.isAndroid || App.isIOS) ...[
+                if (App.isAndroid || App.isIOS || App.isOhos) ...[
                   const SizedBox(width: 12),
                   Expanded(
                     child: Button.outlined(
@@ -1029,7 +819,7 @@ class _WebdavSettingState extends State<_WebdavSetting> {
             const SizedBox(height: 16),
             Center(
               child: Button.filled(
-                isLoading: isTesting,
+                isLoading: isSaving,
                 onPressed: _saveConfig,
                 child: Text("Save".tl),
               ),
@@ -1124,8 +914,9 @@ class _WebdavSyncOptionsState extends State<_WebdavSyncOptions> {
   String _syncModeDescription(WebdavSyncMode mode) => switch (mode) {
     WebdavSyncMode.realtime => "Upload shortly after every change".tl,
     WebdavSyncMode.dataSaver =>
-      "Batch changes; upload on app switch / resume, at most every 30 minutes"
-          .tl,
+      App.isOhos
+          ? "Batch changes; upload on app resume or every 30 minutes while the app is active".tl
+          : "Batch changes; upload on app switch / resume, at most every 30 minutes".tl,
     WebdavSyncMode.manual => "Upload only when triggered manually".tl,
   };
 
@@ -1336,6 +1127,7 @@ class _RemoteBackupListDialog extends StatelessWidget {
       'win' => 'Windows',
       'ios' => 'iOS',
       'android' => 'Android',
+      'ohos' => 'HarmonyOS',
       'macos' => 'macOS',
       'linux' => 'Linux',
       'web' => 'Web',

@@ -1,7 +1,9 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/cache_manager.dart';
@@ -60,6 +62,34 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  for (final locale in ['en-US', 'zh-CN', 'zh-TW']) {
+    testWidgets('single-history progress setting is usable in $locale', (
+      tester,
+    ) async {
+      const key = 'clearReadingProgressOnSingleHistoryDelete';
+      const title =
+          'Clear reading progress when deleting a single history entry';
+      final original = appdata.settings[key];
+      addTearDown(() => appdata.settings[key] = original);
+      appdata.settings['language'] = locale;
+      await open(tester, 390);
+      await search(tester, title);
+
+      final row = find.widgetWithText(ListTile, title.tl);
+      final toggle = find.descendant(of: row, matching: find.byType(Switch));
+      expect(toggle.hitTestable(), findsOneWidget);
+      expect(tester.widget<Switch>(toggle).value, isFalse);
+      await tester.runAsync(() async {
+        await tester.tap(toggle);
+        await appdata.saveData(false);
+      });
+      await tester.pumpAndSettle();
+      expect(appdata.settings[key], isTrue);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
   testWidgets(
     'wide settings starts populated and switches categories',
     (tester) async {
@@ -78,6 +108,238 @@ void main() {
     },
     variant: TargetPlatformVariant.only(TargetPlatform.windows),
   );
+
+  testWidgets('tablet settings consume the top inset before nested log pages', (
+    tester,
+  ) async {
+    tester.view.padding = const FakeViewPadding(top: 48, bottom: 24);
+    tester.view.viewPadding = const FakeViewPadding(top: 48, bottom: 24);
+    await open(tester, 900);
+    final searchField = find.byType(TextField).first;
+    expect(tester.getTopLeft(searchField).dy, greaterThanOrEqualTo(48));
+    final about = find.byKey(const ValueKey('settings-category-7'));
+    await tester.ensureVisible(about);
+    await tester.pumpAndSettle();
+    await tester.tap(about);
+    await tester.pumpAndSettle();
+    await openSection(tester, 'App logs');
+
+    final logs = find.byType(LogsPage);
+    final header = find.descendant(of: logs, matching: find.byType(Appbar));
+    expect(MediaQuery.paddingOf(tester.element(logs)).top, 0);
+    expect(MediaQuery.paddingOf(tester.element(logs)).bottom, 24);
+    expect(tester.getSize(header).height, 52);
+    expect(tester.getTopLeft(header).dy, 48);
+    final detailSurface = find
+        .ancestor(of: logs, matching: find.byType(Material))
+        .first;
+    final scaffold = find.descendant(of: logs, matching: find.byType(Scaffold));
+    expect(
+      tester.widget<Material>(detailSurface).color,
+      tester.widget<Scaffold>(scaffold).backgroundColor ??
+          Theme.of(tester.element(scaffold)).scaffoldBackgroundColor,
+    );
+    final headerBackground = tester
+        .widgetList<Container>(
+          find.descendant(of: header, matching: find.byType(Container)),
+        )
+        .map((container) => container.decoration)
+        .whereType<BoxDecoration>()
+        .first;
+    expect(
+      headerBackground.color,
+      tester.widget<Material>(detailSurface).color,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'desktop back leaves nested settings pages one level at a time',
+    (tester) async {
+      tester.view.physicalSize = const Size(1100, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          navigatorKey: App.rootNavigatorKey,
+          home: const Scaffold(body: Text('home')),
+        ),
+      );
+      App.rootNavigatorKey.currentState!.push(
+        MaterialPageRoute<void>(builder: (_) => const SettingsPage()),
+      );
+      await tester.pumpAndSettle();
+      final about = find.byKey(const ValueKey('settings-category-7'));
+      await tester.ensureVisible(about);
+      await tester.pumpAndSettle();
+      await tester.tap(about);
+      await tester.pumpAndSettle();
+      await openSection(tester, 'App logs');
+      expect(find.byType(LogsPage), findsOneWidget);
+
+      App.pop();
+      await tester.pumpAndSettle();
+      expect(find.byType(LogsPage), findsNothing);
+      expect(find.byType(SettingsPage), findsOneWidget);
+
+      App.pop();
+      await tester.pumpAndSettle();
+      expect(find.byType(SettingsPage), findsNothing);
+      expect(find.text('home'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.windows),
+  );
+
+  testWidgets(
+    'desktop back closes pages inside a pop-up before the pop-up',
+    (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          navigatorKey: App.rootNavigatorKey,
+          home: const Scaffold(body: Text('home')),
+        ),
+      );
+      showPopUpWidget(
+        App.rootContext,
+        Builder(
+          builder: (context) => TextButton(
+            onPressed: () => context.to(
+              () => const Scaffold(body: Text('inner page')),
+            ),
+            child: const Text('open inner'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('open inner'));
+      await tester.pumpAndSettle();
+      expect(find.text('inner page'), findsOneWidget);
+
+      App.pop();
+      await tester.pumpAndSettle();
+      expect(find.text('inner page'), findsNothing);
+      expect(find.text('open inner'), findsOneWidget);
+
+      App.pop();
+      await tester.pumpAndSettle();
+      expect(find.text('open inner'), findsNothing);
+      expect(App.rootNavigatorKey.currentState!.canPop(), isFalse);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.windows),
+  );
+
+  testWidgets('nested model pages share the settings pane and header surface', (
+    tester,
+  ) async {
+    await open(tester, 900);
+    await tester.tap(find.byKey(const ValueKey('settings-category-8')));
+    await tester.pumpAndSettle();
+    await openSection(tester, 'Translation models');
+    final models = find.byType(TranslationModelsPage);
+    expect(models, findsOneWidget);
+    final detailSurface = find
+        .ancestor(of: models, matching: find.byType(Material))
+        .first;
+    final header = find.descendant(
+      of: models,
+      matching: find.byType(SliverAppbar),
+    );
+    final headerSurface = find.descendant(
+      of: header,
+      matching: find.byType(Material),
+    );
+    expect(
+      tester.widget<Material>(headerSurface.first).color,
+      tester.widget<Material>(detailSurface).color,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final width in [800.0, 950.0, 1100.0]) {
+    for (final brightness in Brightness.values) {
+      testWidgets(
+        'settings search is visible below the sidebar title at $width $brightness',
+        (tester) async {
+          if (width == 950) {
+            tester.view.padding = const FakeViewPadding(left: 24, right: 24);
+            tester.view.viewPadding = const FakeViewPadding(
+              left: 24,
+              right: 24,
+            );
+          }
+          await open(tester, width);
+          final theme = ThemeData(brightness: brightness);
+          await tester.pumpWidget(
+            MaterialApp(theme: theme, home: const SettingsPage()),
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(find.byKey(const ValueKey('settings-category-4')));
+          await tester.pumpAndSettle();
+          final searchField = find.byType(TextField).first;
+          expect(find.byType(TextField), findsOneWidget);
+          final searchSurface = find
+              .ancestor(of: searchField, matching: find.byType(Material))
+              .first;
+          final field = tester.widget<TextField>(searchField);
+          expect(
+            tester.getRect(searchField).right,
+            lessThanOrEqualTo(
+              tester.getRect(find.byType(VerticalDivider).first).left,
+            ),
+          );
+          expect(
+            tester.getRect(searchField).top,
+            greaterThan(tester.getRect(find.text('Settings')).bottom),
+          );
+          expect(field.focusNode!.hasFocus, isFalse);
+          expect(field.decoration!.filled, isTrue);
+          expect(
+            field.decoration!.fillColor,
+            isNot(tester.widget<Material>(searchSurface).color),
+          );
+          expect(
+            (field.decoration!.enabledBorder ?? field.decoration!.border)!
+                .borderSide
+                .style,
+            BorderStyle.solid,
+          );
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+  }
+
+  testWidgets('sidebar search keeps shortcuts and result navigation', (
+    tester,
+  ) async {
+    await open(tester, 1100);
+    final searchField = find.byType(TextField).first;
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyK);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(searchField).focusNode!.hasFocus, isTrue);
+
+    await tester.enterText(searchField, 'Language');
+    await tester.pumpAndSettle();
+    final result = find.byKey(const ValueKey('settings-result-Language'));
+    expect(result, findsOneWidget);
+    expect(
+      tester.getRect(result).left,
+      greaterThan(tester.getRect(searchField).right),
+    );
+    await tester.tap(result);
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(searchField).controller!.text, isEmpty);
+    expect(find.text('Language').hitTestable(), findsWidgets);
+    expect(
+      find.byKey(const ValueKey('settings-search-highlight')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
 
   testWidgets(
     'desktop child pages stay beside the category sidebar',

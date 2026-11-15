@@ -725,16 +725,23 @@ class _SliderSettingState extends State<_SliderSetting> {
 }
 
 class _PopupWindowSetting extends StatelessWidget {
-  const _PopupWindowSetting({required this.title, required this.builder});
+  const _PopupWindowSetting({
+    required this.title,
+    required this.builder,
+    this.subtitle,
+  });
 
   final Widget Function() builder;
 
   final String title;
 
+  final String? subtitle;
+
   @override
   Widget build(BuildContext context) {
     return ListTile(
       title: Text(title),
+      subtitle: subtitle == null ? null : Text(subtitle!),
       trailing: const Icon(Icons.arrow_right),
       onTap: () {
         showPopUpWidget(App.rootContext, builder());
@@ -826,14 +833,42 @@ class _MultiPagesFilterState extends State<_MultiPagesFilter> {
     return PopUpWidgetScaffold(
       title: widget.title,
       tailing: [
-        if (keys.length < widget.pages.length)
+        if (canAddMore)
           TextButton.icon(
             label: Text("Add".tl),
             icon: const Icon(Icons.add),
             onPressed: showAddDialog,
           ),
       ],
-      body: view,
+      body: keys.isEmpty ? buildEmpty() : view,
+    );
+  }
+
+  // Stale keys of removed sources don't count toward what is left to add.
+  bool get canAddMore => widget.pages.keys.any((k) => !keys.contains(k));
+
+  Widget buildEmpty() {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.playlist_add,
+            size: 64,
+            color: context.colorScheme.outline,
+          ),
+          const SizedBox(height: 16),
+          Text("No items".tl, style: ts.s16),
+          if (canAddMore) ...[
+            const SizedBox(height: 24),
+            FilledButton.icon(
+              icon: const Icon(Icons.add),
+              label: Text("Add".tl),
+              onPressed: showAddDialog,
+            ),
+          ],
+        ],
+      ),
     );
   }
 
@@ -875,26 +910,34 @@ class _MultiPagesFilterState extends State<_MultiPagesFilter> {
           builder: (context, setState) {
             return ContentDialog(
               title: "Add".tl,
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: canAdd.entries
-                    .map(
-                      (e) => CheckboxListTile(
-                        value: selected.contains(e.key),
-                        title: Text(e.value),
-                        key: Key(e.key),
-                        onChanged: (value) {
-                          setState(() {
-                            if (value!) {
-                              selected.add(e.key);
-                            } else {
-                              selected.remove(e.key);
-                            }
-                          });
-                        },
-                      ),
-                    )
-                    .toList(),
+              // Cap the list so the buttons stay on screen with many entries.
+              content: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: (context.height * 0.6).clamp(160.0, 480.0),
+                ),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: canAdd.entries
+                        .map(
+                          (e) => CheckboxListTile(
+                            value: selected.contains(e.key),
+                            title: Text(e.value),
+                            key: Key(e.key),
+                            onChanged: (value) {
+                              setState(() {
+                                if (value!) {
+                                  selected.add(e.key);
+                                } else {
+                                  selected.remove(e.key);
+                                }
+                              });
+                            },
+                          ),
+                        )
+                        .toList(),
+                  ),
+                ),
               ),
               actions: [
                 if (selected.length < canAdd.length)

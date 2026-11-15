@@ -3,6 +3,7 @@ import 'dart:ui';
 import 'package:flutter/foundation.dart'
     show kIsWeb, TargetPlatform, defaultTargetPlatform;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:venera/foundation/download_network_guard.dart';
@@ -31,6 +32,9 @@ class _App {
 
   bool get isIOS => !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
 
+  // Compare the name so the upstream Flutter SDK can compile this code too.
+  bool get isOhos => !kIsWeb && defaultTargetPlatform.name == 'ohos';
+
   bool get isWindows =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
 
@@ -40,11 +44,22 @@ class _App {
 
   bool get isDesktop => !kIsWeb && (isWindows || isLinux || isMacOS);
 
-  bool get isMobile => !kIsWeb && (isAndroid || isIOS);
+  bool get isMobile => !kIsWeb && (isAndroid || isIOS || isOhos);
 
   // Whether the app has been initialized.
   // If current Isolate is main Isolate, this value is always true.
   bool isInitialized = false;
+
+  /// A short system-scheduled worker must not start unrelated sync or downloads.
+  bool isBackgroundTask = false;
+
+  void initBackgroundTask(String files, String cache, String appVersion) {
+    dataPath = files;
+    cachePath = cache;
+    _version = appVersion;
+    isBackgroundTask = true;
+    isInitialized = true;
+  }
 
   Locale get locale {
     Locale deviceLocale = PlatformDispatcher.instance.locale;
@@ -95,21 +110,23 @@ class _App {
     rootNavigatorKey.currentState?.maybePop();
   }
 
+  /// Desktop Esc and mouse back. [NavigatorState.maybePop] lets a page's
+  /// PopScope or nested navigator step back one level instead of closing it.
   void pop() {
     // Root overlays (sidebars, dialogs) first.
     if (rootNavigatorKey.currentState?.canPop() ?? false) {
-      rootNavigatorKey.currentState?.pop();
+      rootNavigatorKey.currentState?.maybePop();
       return;
     }
     // Main shell routes (settings, pages pushed without tab context).
     if (mainNavigatorKey?.currentState?.canPop() ?? false) {
-      mainNavigatorKey!.currentState!.pop();
+      mainNavigatorKey?.currentState?.maybePop();
       return;
     }
     // Search nested stack while that tab is selected.
     if (secondaryNavigatorActive &&
         (secondaryNavigatorKey?.currentState?.canPop() ?? false)) {
-      secondaryNavigatorKey!.currentState!.pop();
+      secondaryNavigatorKey!.currentState!.maybePop();
     }
   }
 
@@ -125,6 +142,17 @@ class _App {
   Future<void> init() async {
     cachePath = (await getApplicationCacheDirectory()).path;
     dataPath = (await getApplicationSupportDirectory()).path;
+    if (isOhos) {
+      final failures = await const MethodChannel(
+        'venera/method_channel',
+      ).invokeMethod<int>('restoreDirectories');
+      if ((failures ?? 0) > 0) {
+        Log.warning(
+          'IO',
+          '$failures saved directory permission(s) could not be restored.',
+        );
+      }
+    }
     if (isAndroid) {
       externalStoragePath = (await getExternalStorageDirectory())!.path;
     }

@@ -107,6 +107,14 @@ class _DataSyncSettingsState extends State<DataSyncSettings> {
             common: true,
             icon: Icons.download_outlined,
             children: [
+              SelectSetting(
+                title: "Click local comic".tl,
+                settingKey: "onClickLocalComic",
+                optionTranslation: {
+                  "viewDetail": "View Detail".tl,
+                  "read": "Read".tl,
+                },
+              ),
               _SliderSetting(
                 title: "Download Threads".tl,
                 description:
@@ -253,25 +261,10 @@ class _DataSyncSettingsState extends State<DataSyncSettings> {
         ],
         if (!widget.storageOnly) ...[
           _SettingsSection(
-            title: 'Import, export & history',
-            subtitle: 'App data, translated pages and reading history',
+            title: 'Data import & export',
+            subtitle: 'App data and translation results',
             icon: Icons.import_export,
             children: [
-              SelectSetting(
-                title: "Auto clean reading history".tl,
-                settingKey: "autoCleanHistoryDays",
-                help:
-                    "Automatically delete reading history older than the selected period when the app starts."
-                        .tl,
-                optionTranslation: {
-                  "0": "Never".tl,
-                  "7": "7 days".tl,
-                  "30": "30 days".tl,
-                  "90": "90 days".tl,
-                  "180": "180 days".tl,
-                  "365": "365 days".tl,
-                },
-              ),
               _CallbackSetting(
                 title: "Export App Data".tl,
                 callback: () async {

@@ -167,6 +167,15 @@ class ComicStateRepository {
       sourceComicId,
       identity.type,
     );
+    if (localComic == null && identity.type == ComicType.local) {
+      // A local id from another device (synced history) stands for this
+      // device's copy of the same comic (issue #348).
+      final copy = _findSyncedLocalCopy(
+        sourceComicId,
+        history?.title ?? favorite?.title ?? '',
+      );
+      if (copy != null) return load(sourceKey, copy.id);
+    }
 
     return ComicState(
       identity: identity,
@@ -402,24 +411,50 @@ class ComicStateRepository {
     if (!_domainReady) {
       return identity.comicId;
     }
-    final metadata = _ComicMetadata.fromComic(comic);
     return _safeMirror(
       fallbackComicId: identity.comicId,
-      write: () => _db.ensureComicSource(
-        platform: identity.platform,
-        sourceComicId: comic.id,
-        title: comic.title,
-        subtitle: comic.subtitle ?? '',
-        description: comic.description,
-        author: metadata.author,
-        status: metadata.status,
-        updateTime: metadata.updateTime,
-        language: comic.language,
-        coverUri: comic.cover,
-        tags: comic.tags,
-        pageCount: comic.maxPage,
-      ),
+      write: () => _writeComicBase(identity, comic),
       afterBaseWrite: (comicId) => _mirrorCommonState(identity, comicId),
+    );
+  }
+
+  /// Caches the comics of a loaded list page: one transaction for the page,
+  /// and no favorite-folder lookups, so a browsing pass stays cheap on the
+  /// UI isolate.
+  void mirrorBrowsedComics(Iterable<Comic> comics) {
+    if (!_domainReady) {
+      return;
+    }
+    try {
+      _db.runInTransaction(() {
+        for (final comic in comics) {
+          try {
+            _writeComicBase(identityFor(comic.sourceKey, comic.id), comic);
+          } catch (error, stackTrace) {
+            Log.warning('Domain mirror failed', '$error\n$stackTrace');
+          }
+        }
+      });
+    } catch (error, stackTrace) {
+      Log.warning('Domain mirror failed', '$error\n$stackTrace');
+    }
+  }
+
+  String _writeComicBase(ComicIdentity identity, Comic comic) {
+    final metadata = _ComicMetadata.fromComic(comic);
+    return _db.ensureComicSource(
+      platform: identity.platform,
+      sourceComicId: comic.id,
+      title: comic.title,
+      subtitle: comic.subtitle ?? '',
+      description: comic.description,
+      author: metadata.author,
+      status: metadata.status,
+      updateTime: metadata.updateTime,
+      language: comic.language,
+      coverUri: comic.cover,
+      tags: comic.tags,
+      pageCount: comic.maxPage,
     );
   }
 
@@ -537,13 +572,6 @@ class ComicStateRepository {
   }
 
   void _mirrorCommonState(ComicIdentity identity, String comicId) {
-    final history = _findHistory(identity.sourceComicId, identity.type);
-    if (history != null) {
-      _db.markRead(
-        comicId: comicId,
-        occurredAt: history.time.millisecondsSinceEpoch,
-      );
-    }
     for (final folder in _findFavoriteFolders(
       identity.sourceComicId,
       identity.type,
@@ -572,6 +600,17 @@ class ComicStateRepository {
     }
     try {
       return _local.find(sourceComicId, type);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  LocalComic? _findSyncedLocalCopy(String sourceComicId, String title) {
+    if (_localManager == null && !App.isInitialized) {
+      return null;
+    }
+    try {
+      return _local.findSyncedCopy(sourceComicId, title);
     } catch (_) {
       return null;
     }

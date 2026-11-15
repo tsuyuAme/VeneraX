@@ -11,6 +11,7 @@ import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_update_scope.dart';
 import 'package:venera/foundation/follow_update_tasks.dart';
+import 'package:venera/foundation/ohos_follow_scheduler.dart';
 import 'package:venera/utils/data_sync.dart';
 import 'package:venera/utils/translations.dart';
 import '../foundation/global_state.dart';
@@ -297,7 +298,9 @@ class _FollowUpdateProgressBarState extends State<FollowUpdateProgressBar> {
 }
 
 class FollowUpdatesPage extends StatefulWidget {
-  const FollowUpdatesPage({super.key});
+  const FollowUpdatesPage({super.key, this.showAll = false});
+
+  final bool showAll;
 
   static Future<void> openSettings(BuildContext context) async {
     final applied = await showDialog<_SettingsChoice>(
@@ -316,6 +319,7 @@ class FollowUpdatesPage extends StatefulWidget {
       allFolders: applied.allFolders,
       folders: applied.folders,
     );
+    await OhosFollowScheduler.sync();
     final next = FollowUpdateScope.folders();
     for (final folder in previous.difference(next.toSet())) {
       FollowUpdateTaskManager.instance.cancelForFolder(folder);
@@ -675,6 +679,14 @@ class _FollowUpdatesPageState extends AutomaticGlobalState<FollowUpdatesPage> {
   }
 
   Widget buildConfiguredTabs(BuildContext context) {
+    if (widget.showAll) {
+      return Column(
+        children: [
+          buildSummary(context),
+          Expanded(child: buildComicsTab(allComics, emptyText: 'No comics'.tl)),
+        ],
+      );
+    }
     return DefaultTabController(
       length: 3,
       child: Column(
@@ -964,6 +976,7 @@ abstract class FollowUpdatesService {
   static bool _cancelRequested = false;
 
   static Timer? _checkerTimer;
+  static AppLifecycleListener? _lifecycle;
 
   static void _check() async {
     if (_isChecking) {
@@ -1045,6 +1058,17 @@ abstract class FollowUpdatesService {
   static void initChecker() {
     if (_isInitialized) return;
     _isInitialized = true;
+    unawaited(OhosFollowScheduler.sync());
+    if (App.isOhos) {
+      _lifecycle ??= AppLifecycleListener(onResume: () {
+        unawaited(OhosFollowScheduler.sync());
+        if (FollowUpdateScope.checkOnStart && FollowUpdateScope.isPastFixedTime(
+          FollowUpdateScope.fixedTime, DateTime.now(),
+        )) {
+          _check();
+        }
+      });
+    }
     FollowUpdateTaskManager.instance.onTaskFinished = (_) {
       updateFollowUpdatesUI();
     };
@@ -1055,7 +1079,10 @@ abstract class FollowUpdatesService {
     if (FollowUpdateScope.checkOnStart) {
       _check();
     }
-    DataSync().addListener(updateFollowUpdatesUI);
+    DataSync().addListener(() {
+      updateFollowUpdatesUI();
+      unawaited(OhosFollowScheduler.sync());
+    });
     // Polling this often is cheap: the per-comic interval decides what actually
     // gets fetched, so a tick with nothing due starts no task at all.
     _checkerTimer ??= Timer.periodic(const Duration(minutes: 10), (timer) {
@@ -1215,6 +1242,11 @@ class _FollowUpdateSettingsDialogState
           ],
         ),
         const SizedBox(height: 8),
+        if (App.isOhos)
+          Text(
+            "HarmonyOS schedules background checks when resources allow. Checks may be delayed and continue in later runs. Opening the app can check sooner.".tl,
+            style: ts.s12.withColor(context.colorScheme.onSurfaceVariant),
+          ),
       ],
     );
   }

@@ -22,7 +22,12 @@ double get commentsFontSize {
 /// This widget intelligently decides whether to use simple text or rich formatting
 /// based on the content. It supports HTML tags and auto-linking of URLs.
 class CommentContent extends StatelessWidget {
-  const CommentContent({super.key, required this.text, this.fontSize});
+  const CommentContent({
+    super.key,
+    required this.text,
+    this.fontSize,
+    this.onTap,
+  });
 
   final String text;
 
@@ -30,12 +35,20 @@ class CommentContent extends StatelessWidget {
   /// [DefaultTextStyle] (used by compact previews that must not scale).
   final double? fontSize;
 
+  /// A single tap on the text that is not on a link. The selectable text
+  /// takes such taps, so whatever is underneath never sees them.
+  final VoidCallback? onTap;
+
   @override
   Widget build(BuildContext context) {
     if (!text.contains('<') && !text.contains('http')) {
-      return SelectableText(text, style: fontSize == null ? null : TextStyle(fontSize: fontSize));
+      return SelectableText(
+        text,
+        style: fontSize == null ? null : TextStyle(fontSize: fontSize),
+        onTap: onTap,
+      );
     } else {
-      return RichCommentContent(text: text, fontSize: fontSize);
+      return RichCommentContent(text: text, fontSize: fontSize, onTap: onTap);
     }
   }
 }
@@ -171,6 +184,7 @@ class RichCommentContent extends StatefulWidget {
     this.showImages = true,
     this.fontSize,
     this.selectable = true,
+    this.onTap,
   });
 
   final String text;
@@ -183,6 +197,9 @@ class RichCommentContent extends StatefulWidget {
 
   /// Prefer false inside horizontal lists so link taps are not stolen.
   final bool selectable;
+
+  /// See [CommentContent.onTap].
+  final VoidCallback? onTap;
 
   @override
   State<RichCommentContent> createState() => _RichCommentContentState();
@@ -339,7 +356,7 @@ class _RichCommentContentState extends State<RichCommentContent> {
     }
     final span = TextSpan(style: baseStyle, children: textSpan);
     Widget content = widget.selectable
-        ? SelectableText.rich(span)
+        ? SelectableText.rich(span, onTap: widget.onTap)
         : Text.rich(span);
     if (images.isNotEmpty && widget.showImages) {
       content = Column(

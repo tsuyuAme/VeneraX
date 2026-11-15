@@ -102,6 +102,36 @@ class _ExploreSettingsState extends State<ExploreSettings> {
           ],
         ),
         _SettingsSection(
+          title: 'Reading history',
+          icon: Icons.history,
+          children: [
+            _SwitchSetting(
+              title:
+                  'Clear reading progress when deleting a single history entry'
+                      .tl,
+              settingKey: 'clearReadingProgressOnSingleHistoryDelete',
+              subtitle:
+                  'Also clear the saved page and read chapters when manually deleting one history entry. Batch deletion, clearing all history and automatic cleanup keep reading progress. Reading time statistics are kept.'
+                      .tl,
+            ),
+            SelectSetting(
+              title: "Auto clean reading history".tl,
+              settingKey: "autoCleanHistoryDays",
+              help:
+                  "Automatically delete reading history older than the selected period when the app starts."
+                      .tl,
+              optionTranslation: {
+                "0": "Never".tl,
+                "7": "7 days".tl,
+                "30": "30 days".tl,
+                "90": "90 days".tl,
+                "180": "180 days".tl,
+                "365": "365 days".tl,
+              },
+            ),
+          ],
+        ),
+        _SettingsSection(
           title: 'Search preferences',
           subtitle: 'Default search, language filters and comic sources',
           icon: Icons.search,
@@ -129,6 +159,13 @@ class _ExploreSettingsState extends State<ExploreSettings> {
                 'english': "English",
                 'japanese': "Japanese",
               },
+            ),
+            _PopupWindowSetting(
+              title: "Language Filter Sources".tl,
+              subtitle:
+                  "Only add sources whose search supports the language: syntax. Searches on these sources get the selected language added, e.g. abc becomes abc language:chinese."
+                      .tl,
+              builder: setLanguageFilterSourcesWidget,
             ),
             _PopupWindowSetting(
               title: "Search Sources".tl,
@@ -382,6 +419,20 @@ Widget setSearchSourcesWidget() {
   return _MultiPagesFilter(
     title: "Search Sources".tl,
     settingsIndex: "searchSources",
+    pages: pages,
+  );
+}
+
+Widget setLanguageFilterSourcesWidget() {
+  var pages = <String, String>{};
+  for (var c in ComicSource.all()) {
+    if (c.searchPageData != null) {
+      pages[c.key] = c.name;
+    }
+  }
+  return _MultiPagesFilter(
+    title: "Language Filter Sources".tl,
+    settingsIndex: "languageFilterSources",
     pages: pages,
   );
 }

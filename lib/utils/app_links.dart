@@ -8,6 +8,8 @@ import 'package:venera/foundation/app_page_route.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/pages/comic_details_page/comic_page.dart';
+import 'package:venera/utils/handle_notification_route.dart';
+import 'package:venera/utils/reading_widget_route.dart';
 
 typedef AppLinkCandidate = ({String sourceKey, LinkHandler? linkHandler});
 typedef AppLinkTarget = ({String sourceKey, String comicId});
@@ -83,6 +85,7 @@ NavigatorState? _navigatorForAppLinks() {
 }
 
 Future<bool> handleAppLink(Uri uri) async {
+  if (await handleReadingWidgetLink(uri)) return true;
   final target = resolveAppLink(
     uri,
     ComicSource.all().map(
@@ -93,6 +96,11 @@ Future<bool> handleAppLink(Uri uri) async {
 
   // Dismiss comment sidebars / dialogs first (they live on the root navigator).
   App.closeRootOverlays();
+
+  // Wait for the main navigator to be usable (app foregrounded, past the
+  // auth screen, source registry ready) before pushing.
+  final navigator = await waitForUnlockedMainNavigator();
+  if (navigator == null) return false;
 
   // Wait until the overlay routes have actually been removed, then push.
   // A single post-frame callback is not always enough after multiple pops

@@ -12,7 +12,7 @@ import 'package:venera/utils/init.dart';
 import 'package:venera/utils/io.dart';
 import 'package:venera/utils/sync_skip.dart';
 
-class Appdata with Init {
+class Appdata with Init, ChangeNotifier {
   Appdata._create();
 
   final Settings settings = Settings._create();
@@ -33,9 +33,13 @@ class Appdata with Init {
       // Atomic replace: a kill mid-write used to truncate appdata.json, and
       // the load path resets a corrupt file — silently wiping every setting
       // (WebDAV credentials, dataVersion, ...) on the next launch.
-      futures.add(
-        writeStringAtomic(FilePath.join(App.dataPath, 'appdata.json'), data),
-      );
+      if (App.isBackgroundTask) {
+        writeStringAtomicSync(FilePath.join(App.dataPath, 'appdata.json'), data);
+      } else {
+        futures.add(
+          writeStringAtomic(FilePath.join(App.dataPath, 'appdata.json'), data),
+        );
+      }
 
       var disableSyncFields = json["settings"]["disableSyncFields"] as String;
       var json4sync = jsonDecode(data);
@@ -47,17 +51,19 @@ class Appdata with Init {
         json4sync.remove('searchHistory');
       }
       var data4sync = jsonEncode(json4sync);
-      futures.add(
-        writeStringAtomic(
-          FilePath.join(App.dataPath, 'syncdata.json'),
-          data4sync,
-        ),
-      );
-
-      await Future.wait(futures);
+      if (App.isBackgroundTask) {
+        writeStringAtomicSync(FilePath.join(App.dataPath, 'syncdata.json'), data4sync);
+      } else {
+        futures.add(
+          writeStringAtomic(FilePath.join(App.dataPath, 'syncdata.json'), data4sync),
+        );
+        await Future.wait(futures);
+      }
     } finally {
       _isSavingData = false;
     }
+    // Collection settings can change in place without invoking Settings.[]=.
+    notifyListeners();
     if (sync) {
       // Funnel through the auto-upload gate: honors the user's auto-sync
       // toggle (a configured-but-disabled device must NOT upload on every
@@ -292,7 +298,13 @@ class Appdata with Init {
     };
   }
 
-  void writeImplicitData() async {
+  Future<void> writeImplicitData() async {
+    if (App.isBackgroundTask) {
+      writeStringAtomicSync(
+        FilePath.join(App.dataPath, 'implicitData.json'), jsonEncode(implicitData),
+      );
+      return;
+    }
     while (_isSavingData) {
       await Future.delayed(const Duration(milliseconds: 20));
     }
@@ -405,6 +417,8 @@ class Settings with ChangeNotifier {
     'autoPageTurningMode': 'page', // page, scroll
     'autoScrollSpeed': 15, // 1 - 30, higher is faster
     'readerMode': 'galleryLeftToRight', // values of [ReaderMode]
+    'adaptiveReading': false,
+    'adaptivePagedMode': 'galleryLeftToRight',
     'enableContinuousChapterReading': true,
     'readerScreenPicNumberForLandscape': 1, // 1 - 5
     'readerScreenPicNumberForPortrait': 1, // 1 - 5
@@ -432,6 +446,7 @@ class Settings with ChangeNotifier {
     'longPressZoomPosition': "press", // press, center
     'checkUpdateOnStart': true,
     'autoCleanHistoryDays': '0', // retention days; '0' keeps history forever
+    'clearReadingProgressOnSingleHistoryDelete': false,
     'limitImageWidth': true,
     // Image width as a percentage of viewport height when limitImageWidth is on
     // (40 - 150). Above the window's own width/height ratio the cap stops
@@ -473,6 +488,7 @@ class Settings with ChangeNotifier {
     'requireDisclaimerConsent': false,
     'disclaimerConsented': false,
     'onClickFavorite': 'viewDetail', // viewDetail, read
+    'onClickLocalComic': 'viewDetail', // viewDetail, read
     'enableDnsOverrides': false,
     'dnsOverrides': {},
     // Off by default: logging every successful request costs a disk write per
@@ -484,6 +500,7 @@ class Settings with ChangeNotifier {
     'customImageProcessing': defaultCustomImageProcessing,
     'sni': true,
     'autoAddLanguageFilter': 'none', // none, chinese, english, japanese
+    'languageFilterSources': [], // source keys picked by the user
     'comicSourceListUrl': _defaultSourceListUrl,
     'comicSourceLibraries': [],
     'comicSourceProvenance': <String, dynamic>{},
