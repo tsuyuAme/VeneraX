@@ -71,9 +71,10 @@ abstract mixin class _ComicPageActions {
       rawTags.addAll(e.value.map((tag) => '${e.key}:$tag'));
     }
     final buckets = splitFavoriteTags(rawTags);
-    final author = buckets.authors.isNotEmpty
-        ? buckets.authors.join(', ')
-        : (comic.subTitle ?? comic.uploader ?? '');
+    // Author comes from real author/artist tags only. No subtitle/uploader
+    // fallback: an empty author keeps the tile's author row hidden instead
+    // of storing a wrong name (e.g. the Japanese title on E-Hentai).
+    final author = buckets.authors.join(', ');
     return FavoriteItem(
       id: comic.id,
       name: comic.title,

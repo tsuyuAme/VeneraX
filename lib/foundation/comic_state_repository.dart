@@ -279,11 +279,18 @@ class ComicStateRepository {
           comic.cover,
       sourceName: badge ?? _sourceNameFor(comic.sourceKey),
       author: _pick([
-        domain?.author,
         localMeta?.author,
-        favoriteMeta?.author,
+        domain?.author,
         currentMeta.author,
-        history?.subtitle,
+        // Legacy favorites/history store an author captured with an older
+        // fallback chain (subtitle/uploader — e.g. the Japanese title on
+        // E-Hentai). Once a domain mirror exists it is authoritative: an
+        // empty author there means the comic genuinely has none, and the
+        // stale records must not resurrect the wrong name on the tile.
+        if (domain == null && localComic == null) ...[
+          favoriteMeta?.author,
+          history?.subtitle,
+        ],
       ]),
       status: status,
       updateTime: updateTime,
