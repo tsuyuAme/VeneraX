@@ -480,6 +480,10 @@ class ComicStateRepository {
         sourceTitle: comic.title,
         tags: comic.plainTags,
         pageCount: comic.maxPage,
+        // Fresh details loaded from the source page are authoritative:
+        // replace stale (possibly polluted) title/author snapshots instead
+        // of merging into them, so bad data self-heals on the next visit.
+        replaceMetadata: true,
       ),
       afterBaseWrite: (comicId) {
         _mirrorChapters(identity, comic.chapters);
@@ -948,10 +952,11 @@ class _ComicMetadata {
   factory _ComicMetadata.fromDetails(ComicDetails comic) {
     final tags = comic.plainTags;
     return _ComicMetadata(
+      // Author must come from real author/artist tags only. Falling back to
+      // subTitle (e.g. the Japanese title on E-Hentai) or the uploader used
+      // to pollute the domain DB and list tiles with a wrong "author".
       author:
           clean(comic.findAuthor()) ??
-          clean(comic.subTitle) ??
-          clean(comic.uploader) ??
           _first(namespaceValues(tags, _authorNamespaces)),
       status: statusFromTags(tags),
       updateTime:

@@ -285,9 +285,12 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
                   .toList(),
             ),
       relatedLinks: relatedLinks,
-      comic: widget.title != null || widget.cover != null
+      // Only build the error-page comic when a real title is available.
+      // Comics opened by URL have no title; using the raw id/URL as the title
+      // used to leak into the domain DB via the migration/related-source flow.
+      comic: widget.title != null
           ? Comic(
-              widget.title ?? _id,
+              widget.title!,
               widget.cover ?? '',
               _id,
               null,
@@ -1032,8 +1035,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
         const SizedBox(height: 12),
         ComicDescription(
           title: comic.title,
-          subtitle:
-              comic.findAuthor() ?? comic.subTitle ?? comic.uploader ?? '',
+          subtitle: comic.findAuthor() ?? '',
           description: comic.description ?? '',
           badge: ComicSource.find(comic.sourceKey)?.name,
           tags: comic.plainTags,
