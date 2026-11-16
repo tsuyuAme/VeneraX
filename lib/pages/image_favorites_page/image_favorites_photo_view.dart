@@ -1,14 +1,31 @@
 part of 'image_favorites_page.dart';
 
+/// 收藏图片的大图翻页图册。
+///
+/// 两种模式：
+/// - [ImageFavoritesPhotoView]：单部漫画，遍历该漫画全部收藏图；
+/// - [ImageFavoritesPhotoView.global]：跨漫画全局图册，
+///   全部漫画的收藏图按漫画顺序混排，底栏显示当前所属漫画。
 class ImageFavoritesPhotoView extends StatefulWidget {
+  /// 单部漫画图册：从 [imageFavorite] 开始翻页。
   const ImageFavoritesPhotoView({
     super.key,
-    required this.comic,
-    required this.imageFavorite,
-  });
+    required ImageFavoritesComic comic,
+    required ImageFavorite imageFavorite,
+  }) : comics = [comic],
+       initialImage = imageFavorite;
 
-  final ImageFavoritesComic comic;
-  final ImageFavorite imageFavorite;
+  /// 跨漫画全局图册：[comics] 里全部收藏图混排翻页。
+  const ImageFavoritesPhotoView.global({
+    super.key,
+    required this.comics,
+    this.initialImage,
+  }) : assert(comics.length > 0);
+
+  final List<ImageFavoritesComic> comics;
+
+  /// 起始定位的图片；不在列表中或为 null 时从第一张开始。
+  final ImageFavorite? initialImage;
 
   @override
   State<ImageFavoritesPhotoView> createState() =>
@@ -19,7 +36,10 @@ class _ImageFavoritesPhotoViewState extends State<ImageFavoritesPhotoView> {
   late PageController controller;
   Map<ImageFavorite, bool> cancelImageFavorites = {};
 
-  var images = <ImageFavorite>[];
+  /// (所属漫画, 收藏图片) 的混排序列，全局/单漫画模式共用。
+  final entries = <(ImageFavoritesComic, ImageFavorite)>[];
+
+  bool get isGlobal => widget.comics.length > 1;
 
   int currentPage = 0;
 
@@ -28,11 +48,13 @@ class _ImageFavoritesPhotoViewState extends State<ImageFavoritesPhotoView> {
   @override
   void initState() {
     var current = 0;
-    for (var ep in widget.comic.imageFavoritesEp) {
-      for (var image in ep.imageFavorites) {
-        images.add(image);
-        if (image == widget.imageFavorite) {
-          current = images.length - 1;
+    for (var comic in widget.comics) {
+      for (var ep in comic.imageFavoritesEp) {
+        for (var image in ep.imageFavorites) {
+          entries.add((comic, image));
+          if (image == widget.initialImage) {
+            current = entries.length - 1;
+          }
         }
       }
     }
@@ -54,8 +76,11 @@ class _ImageFavoritesPhotoViewState extends State<ImageFavoritesPhotoView> {
     }
   }
 
+  ImageFavoritesComic get currentComic =>
+      entries[currentPage].$1;
+
   PhotoViewGalleryPageOptions _buildItem(BuildContext context, int index) {
-    var image = images[index];
+    var image = entries[index].$2;
     return PhotoViewGalleryPageOptions(
       // 图片加载器 支持本地、网络
       imageProvider: ImageFavoritesProvider(image),
@@ -75,6 +100,18 @@ class _ImageFavoritesPhotoViewState extends State<ImageFavoritesPhotoView> {
 
   @override
   Widget build(BuildContext context) {
+    if (entries.isEmpty) {
+      return PopScope(
+        onPopInvokedWithResult: (bool didPop, Object? result) {
+          if (didPop) {
+            onPop();
+          }
+        },
+        child: Scaffold(
+          body: Center(child: Text("No images".tl)),
+        ),
+      );
+    }
     return PopScope(
       onPopInvokedWithResult: (bool didPop, Object? result) async {
         if (didPop) {
@@ -88,7 +125,7 @@ class _ImageFavoritesPhotoViewState extends State<ImageFavoritesPhotoView> {
           }
           if (event is PointerScrollEvent) {
             if (event.scrollDelta.dy > 0) {
-              if (controller.page! >= images.length - 1) {
+              if (controller.page! >= entries.length - 1) {
                 return;
               }
               controller.nextPage(
@@ -109,7 +146,7 @@ class _ImageFavoritesPhotoViewState extends State<ImageFavoritesPhotoView> {
                 color: context.colorScheme.surface,
               ),
               builder: _buildItem,
-              itemCount: images.length,
+              itemCount: entries.length,
               loadingBuilder: (context, event) => Center(
                 child: SizedBox(
                   width: 20.0,
@@ -145,27 +182,40 @@ class _ImageFavoritesPhotoViewState extends State<ImageFavoritesPhotoView> {
   }
 
   Widget buildPageInfo() {
-    var text = "${currentPage + 1}/${images.length}";
+    var text = "${currentPage + 1}/${entries.length}";
+    // 全局图册：附上当前图片所属的漫画名。
+    if (isGlobal) {
+      text += "  ·  ${currentComic.title}";
+    }
     return Positioned(
       height: 40,
       left: 0,
       right: 0,
       bottom: 0,
       child: Center(
-        child: Stack(
-          children: [
-            Text(
-              text,
-              style: TextStyle(
-                fontSize: 14,
-                foreground: Paint()
-                  ..style = PaintingStyle.stroke
-                  ..strokeWidth = 1.4
-                  ..color = context.colorScheme.onInverseSurface,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: context.width * 0.86),
+          child: Stack(
+            children: [
+              Text(
+                text,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 14,
+                  foreground: Paint()
+                    ..style = PaintingStyle.stroke
+                    ..strokeWidth = 1.4
+                    ..color = context.colorScheme.onInverseSurface,
+                ),
               ),
-            ),
-            Text(text),
-          ],
+              Text(
+                text,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -197,8 +247,12 @@ class _ImageFavoritesPhotoViewState extends State<ImageFavoritesPhotoView> {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  widget.comic.title,
+                  isGlobal
+                      ? "${"Image Favorites".tl} · ${currentComic.title}"
+                      : currentComic.title,
                   style: TextStyle(fontSize: 18),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
               IconButton(
@@ -219,10 +273,20 @@ class _ImageFavoritesPhotoViewState extends State<ImageFavoritesPhotoView> {
       Offset(context.width, context.padding.top),
       [
         MenuEntry(
+          icon: Icons.chrome_reader_mode_outlined,
+          text: "Details".tl,
+          onClick: () {
+            var comic = currentComic;
+            App.mainNavigatorKey?.currentContext?.to(
+              () => ComicPage(id: comic.id, sourceKey: comic.sourceKey),
+            );
+          },
+        ),
+        MenuEntry(
           icon: Icons.image_outlined,
           text: "Save Image".tl,
           onClick: () async {
-            var temp = images[currentPage];
+            var temp = entries[currentPage].$2;
             var imageProvider = ImageFavoritesProvider(temp);
             var data = await imageProvider.load(null, null);
             var fileType = detectFileType(data);
@@ -234,15 +298,14 @@ class _ImageFavoritesPhotoViewState extends State<ImageFavoritesPhotoView> {
           icon: Icons.menu_book_outlined,
           text: "Read".tl,
           onClick: () async {
-            var comic = widget.comic;
-            var ep = images[currentPage].ep;
-            var page = images[currentPage].page;
+            var comic = currentComic;
+            var image = entries[currentPage].$2;
             App.rootContext.to(
               () => ReaderWithLoading(
                 id: comic.id,
                 sourceKey: comic.sourceKey,
-                initialEp: ep,
-                initialPage: page,
+                initialEp: image.ep,
+                initialPage: image.page,
               )
             );
           },
