@@ -112,6 +112,37 @@ void main() {
     });
   });
 
+  group('usableBackupFileNames', () {
+    test('returns the list unchanged when no corruption is recorded', () {
+      var files = ['20240-9.win.venera', null, 'notes.txt'];
+      expect(usableBackupFileNames(files, {}), files);
+    });
+
+    test('removes recorded-corrupt backups so version logic skips them', () {
+      // Regression: a truncated upload stamped with the highest version made
+      // every device read "local behind server", pull the unreadable file and
+      // deadlock on "Backup file is corrupted or unsupported".
+      expect(
+        usableBackupFileNames([
+          '20240-11.win.venera',
+          '20240-10.win.venera',
+          '20240-3.android.venera',
+        ], {
+          '20240-11.win.venera',
+        }),
+        ['20240-10.win.venera', '20240-3.android.venera'],
+      );
+    });
+
+    test('corrupt list matching is exact, not by version', () {
+      var files = ['20240-11.win.venera', '20240-12.win.venera'];
+      expect(
+        usableBackupFileNames(files, {'20240-1.win.venera'}),
+        files,
+      );
+    });
+  });
+
   group('nextSyncVersion', () {
     test('steady state (local == remote max) is unchanged: max + 1', () {
       // Normal daily use keeps local aligned to the server, so this is the
