@@ -89,6 +89,9 @@ class _ImageFavoritesPhotoViewState extends State<ImageFavoritesPhotoView> {
       // 初始化大小 全部展示
       minScale: PhotoViewComputedScale.contained * 1.0,
       maxScale: PhotoViewComputedScale.covered * 10.0,
+      // 与阅读器（gallery_mode/continuous_mode 的 FilterQuality.medium）和
+      // 列表缩略图保持一致。包默认值是 none/low，放大的画廊图会明显发糊。
+      filterQuality: FilterQuality.medium,
       onTapUp: (context, details, controllerValue) {
         setState(() {
           isAppBarShow = !isAppBarShow;
