@@ -8,7 +8,9 @@ part of 'image_favorites_page.dart';
 ///   全部漫画的收藏图按漫画顺序混排，底栏显示当前所属漫画。
 class ImageFavoritesPhotoView extends StatefulWidget {
   /// 单部漫画图册：从 [imageFavorite] 开始翻页。
-  const ImageFavoritesPhotoView({
+  ///
+  /// 非 const：初始化器需要用参数构造 `[comic]` 列表，不是潜在常量表达式。
+  ImageFavoritesPhotoView({
     super.key,
     required ImageFavoritesComic comic,
     required ImageFavorite imageFavorite,
