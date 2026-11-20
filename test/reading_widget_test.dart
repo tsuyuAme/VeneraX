@@ -11,6 +11,7 @@ import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/favorites.dart';
+import 'package:venera/foundation/follow_update_result.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/reading_widget.dart';
@@ -28,6 +29,16 @@ History history(String id, {int type = 0}) => History.fromMap({
   'page': 7,
   'readEpisode': <String>[],
 });
+
+final class _RecordDirectories extends IOOverrides {
+  final paths = <String>[];
+
+  @override
+  Directory createDirectory(String path) {
+    paths.add(path);
+    return super.createDirectory(path);
+  }
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -48,6 +59,7 @@ void main() {
     snapshots.clear();
     active = true;
     reads = 0;
+    appdata.implicitData.remove('follow_update_last_result');
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(readingWidgetChannel, (call) async {
           if (call.method == 'hasWidgets') return active;
@@ -244,6 +256,50 @@ void main() {
     },
   );
 
+  test('local cards leave out comics whose folders hold no pages', () async {
+    LocalComic comic(String id) => LocalComic(
+      id: id,
+      title: id,
+      subtitle: '',
+      tags: [],
+      directory: '${directory.path}${Platform.pathSeparator}$id',
+      chapters: null,
+      cover: '',
+      comicType: ComicType.local,
+      downloadedChapters: [],
+      createdAt: DateTime(2026),
+    );
+    final root = directory.path;
+    Directory('$root/pages').createSync();
+    File('$root/pages/1.png').writeAsBytesSync([1]);
+    Directory('$root/chapter/1').createSync(recursive: true);
+    File('$root/chapter/1/1.png').writeAsBytesSync([1]);
+    Directory('$root/empty/1').createSync(recursive: true);
+    final ids = ['pages', 'chapter', 'empty', 'missing'];
+    final opened = _RecordDirectories();
+    await IOOverrides.runWithIOOverrides(
+      () => ReadingWidgetService(
+        recent: () => [],
+        following: () => [],
+        local: () => [for (final id in ids) comic(id)],
+        visible: (_) => true,
+        coverBytes: (_) async => Uint8List(0),
+      ).refresh(),
+      opened,
+    );
+    expect(
+      (latest(ReadingWidgetKind.local)['items'] as List).map(
+        (item) => item['id'],
+      ),
+      ['pages', 'chapter'],
+    );
+    // The folders are read on a background isolate, never on this one.
+    expect(
+      opened.paths.where((path) => ids.any((id) => path.endsWith(id))),
+      isEmpty,
+    );
+  });
+
   test('malformed or unrelated links never become widget navigation', () {
     for (final link in [
       'https://reading-widget/history',
@@ -313,6 +369,10 @@ void main() {
         followed('new', true, 1000),
         followed('read', false, 2000),
       ];
+      var check = FollowUpdateResult(
+        checkedAt: DateTime.fromMillisecondsSinceEpoch(2000),
+        updatedKeys: {'42 new', '42 read'},
+      );
       File('${directory.path}/page.png').writeAsBytesSync([1]);
       final downloaded = LocalComic(
         id: 'offline',
@@ -329,6 +389,7 @@ void main() {
       final publisher = ReadingWidgetService(
         recent: () => [history('recent')],
         following: () => followedItems,
+        lastCheck: () => check,
         local: () => [downloaded],
         visible: (_) => true,
         coverBytes: (_) async => Uint8List(0),
@@ -339,13 +400,13 @@ void main() {
         (latest(ReadingWidgetKind.following)['items'] as List).map(
           (item) => item['id'],
         ),
-        ['new', 'read'],
+        ['new'],
       );
       expect(
         (latest(ReadingWidgetKind.updates)['items'] as List).map(
           (item) => item['id'],
         ),
-        ['new'],
+        ['new', 'read'],
       );
       expect(
         (latest(ReadingWidgetKind.local)['items'] as List).map(
@@ -371,12 +432,100 @@ void main() {
       followedItems[0].hasNewUpdate = false;
       followedItems[0].lastCheckTime = 100000;
       await publisher.refresh();
+      expect(latest(ReadingWidgetKind.updates)['items'], hasLength(2));
+      expect(latest(ReadingWidgetKind.updates)['subtitle'], previousCheck);
+      expect(latest(ReadingWidgetKind.following)['items'], isEmpty);
+      check = FollowUpdateResult(
+        checkedAt: DateTime.fromMillisecondsSinceEpoch(100000),
+        updatedKeys: {},
+      );
+      await publisher.refresh();
       expect(latest(ReadingWidgetKind.updates)['items'], isEmpty);
+      expect(
+        latest(ReadingWidgetKind.updates)['emptyText'],
+        'The latest check found no updates.',
+      );
       expect(
         latest(ReadingWidgetKind.updates)['subtitle'],
         isNot(previousCheck),
       );
-      expect(latest(ReadingWidgetKind.following)['items'], hasLength(2));
+      check = FollowUpdateResult(
+        checkedAt: check.checkedAt,
+        updatedKeys: {},
+        failed: 1,
+      );
+      await publisher.refresh();
+      expect(
+        latest(ReadingWidgetKind.updates)['emptyText'],
+        contains('could not be checked'),
+      );
+      check = FollowUpdateResult(checkedAt: check.checkedAt, updatedKeys: null);
+      await publisher.refresh();
+      expect(
+        latest(ReadingWidgetKind.updates)['emptyText'],
+        'Run a check to see its results here.',
+      );
     },
   );
+
+  // Refreshes started by changes run unawaited; wait for their writes.
+  Future<void> published(int count) async {
+    final deadline = DateTime.now().add(const Duration(seconds: 5));
+    while (snapshots.length < count) {
+      if (DateTime.now().isAfter(deadline)) fail('Cards were not published');
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+  }
+
+  test('changes while the app is in front publish once it leaves', () async {
+    final publisher = service([history('one')]);
+    publisher.onDataChanged();
+    publisher.onDataChanged();
+    await Future<void>.delayed(const Duration(milliseconds: 700));
+    expect(snapshots, isEmpty);
+
+    publisher.didChangeAppLifecycleState(ui.AppLifecycleState.inactive);
+    await published(4);
+    expect(latest()['items'], hasLength(1));
+    snapshots.clear();
+    publisher.didChangeAppLifecycleState(ui.AppLifecycleState.hidden);
+    publisher.didChangeAppLifecycleState(ui.AppLifecycleState.paused);
+    publisher.didChangeAppLifecycleState(ui.AppLifecycleState.resumed);
+    publisher.didChangeAppLifecycleState(ui.AppLifecycleState.inactive);
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(snapshots, isEmpty);
+  });
+
+  test('changes while the app is away publish shortly after', () async {
+    final publisher = service([history('one')]);
+    publisher.didChangeAppLifecycleState(ui.AppLifecycleState.paused);
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(snapshots, isEmpty);
+    publisher.onDataChanged();
+    await published(4);
+    expect(latest()['items'], hasLength(1));
+  });
+
+  test('locking is published at once while the app is in front', () async {
+    final publisher = service([history('secret')]);
+    publisher.onDataChanged();
+    appdata.settings['authorizationRequired'] = true;
+    publisher.onDataChanged();
+    await published(4);
+    expect(
+      snapshots.every((snapshot) => (snapshot['items'] as List).isEmpty),
+      isTrue,
+    );
+    snapshots.clear();
+    publisher.onDataChanged();
+    publisher.didChangeAppLifecycleState(ui.AppLifecycleState.paused);
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(snapshots, isEmpty);
+
+    appdata.settings['authorizationRequired'] = false;
+    publisher.onDataChanged();
+    await published(4);
+    expect(latest()['items'], hasLength(1));
+  });
 }

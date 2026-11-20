@@ -46,6 +46,8 @@ class _LogsPageState extends State<LogsPage> {
     super.initState();
     _snapshot();
     if (_live) Log.changes.addListener(_onLogsChanged);
+    // OS crash events can arrive after the startup read.
+    if (_live && App.isOhos) unawaited(readOhosNativeDiagnostics());
   }
 
   @override
@@ -227,6 +229,12 @@ class _LogsPageState extends State<LogsPage> {
         text: 'Previous run logs'.tl,
         subtitle: 'Check here after a crash'.tl,
         onClick: _openPreviousRun,
+      ),
+      MenuEntry(
+        icon: Icons.bug_report_outlined,
+        text: 'Export diagnostic report'.tl,
+        subtitle: 'For reporting a crash; addresses and accounts are hidden'.tl,
+        onClick: () => context.to(() => const DiagnosticsPage()),
       ),
       MenuEntry(
         icon: Icons.network_check,

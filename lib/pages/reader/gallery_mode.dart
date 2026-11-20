@@ -76,8 +76,11 @@ class _GalleryModeState extends State<_GalleryMode>
   /// The delay also coalesces rapid flips into a single cache pass.
   void _schedulePrecache(int page) {
     _precacheTimer?.cancel();
+    final chapter = reader.chapter;
     _precacheTimer = Timer(const Duration(milliseconds: 200), () {
-      if (!mounted || reader.page != page) return;
+      // A chapter switch keeps this view until the next frame, with the old
+      // images but the new chapter's id.
+      if (!mounted || reader.page != page || reader.chapter != chapter) return;
       // On the comments page this warms up the last image, the page a turn
       // back from there shows.
       cache(page);
@@ -127,6 +130,7 @@ class _GalleryModeState extends State<_GalleryMode>
     final decodeAhead = preCacheCount.clamp(1, 2);
     final (shownStart, shownEnd) = getPageImagesRange(startPage);
     for (var i = shownStart; i < shownEnd; i++) {
+      _probeImageSize(i);
       _measureImage(i);
     }
     for (int i = startPage - 1; i <= startPage + preCacheCount; i++) {
@@ -146,6 +150,7 @@ class _GalleryModeState extends State<_GalleryMode>
     if (isChapterCommentsPage(page)) return;
     var (startIndex, endIndex) = getPageImagesRange(page);
     for (int i = startIndex; i < endIndex; i++) {
+      _probeImageSize(i);
       if (shouldPreCache) {
         _precacheImage(i + 1, context);
         _measureImage(i);
@@ -188,6 +193,40 @@ class _GalleryModeState extends State<_GalleryMode>
     _watchImage(_createImageProvider(index + 1, context), index);
   }
 
+  /// Local pages whose file headers are being read.
+  final _probing = <String>{};
+
+  /// A local page's size from its file header, ahead of any decode, so the
+  /// pages it lands on are grouped before the reader turns to them. A turn
+  /// onto a still provisional page waited for its decode and a regroup that
+  /// rebuilt the pager (#352).
+  void _probeImageSize(int index) {
+    final images = reader.images;
+    if (!reader._layoutUsesWideImages ||
+        images == null ||
+        index < 0 ||
+        index >= images.length) {
+      return;
+    }
+    final imageKey = images[index];
+    // A processing script may change the size; decodes measure those.
+    if (!imageKey.startsWith('file://') ||
+        appdata.settings['enableCustomImageProcessing'] == true ||
+        reader.imageSizeOf(index) != null ||
+        !_probing.add(imageKey)) {
+      return;
+    }
+    readLocalImageSize(imageKey).then((size) {
+      _probing.remove(imageKey);
+      if (size == null || !mounted || !identical(reader.images, images)) return;
+      if (reader.imageSizeOf(index) != null) return;
+      if (reader.noteImageSize(index, size)) {
+        _regroupPending = true;
+        _scheduleRegroup();
+      }
+    });
+  }
+
   /// Resolve the visible grouping before drawing images into provisional slots.
   bool _preparePageLayout(int page) {
     if (!reader._layoutUsesWideImages) return true;
@@ -197,7 +236,9 @@ class _GalleryModeState extends State<_GalleryMode>
       final provider = _createImageProvider(index + 1, context);
       if (!_isDecoded(provider)) _awaitingDecode.add(index);
       final cached = PaintingBinding.instance.imageCache.statusForKey(provider);
-      if (page == reader.page ||
+      // A neighbor is built once a turn starts showing it; start its decode
+      // then rather than once the turn passes halfway.
+      if ((page - reader.page).abs() <= 1 ||
           cached.keepAlive ||
           (cached.live && !cached.pending)) {
         _watchImage(provider, index);
@@ -799,6 +840,8 @@ class _GalleryModeState extends State<_GalleryMode>
 
   @override
   Future<void> animateToPage(int page) {
+    // Unmounted pager, e.g. while a chapter that failed to load shows its error.
+    if (!controller.hasClients) return Future.value();
     if ((page - controller.page!.round()).abs() > 1) {
       controller.jumpToPage(page > controller.page! ? page - 1 : page + 1);
     }
@@ -811,6 +854,7 @@ class _GalleryModeState extends State<_GalleryMode>
 
   @override
   void toPage(int page) {
+    if (!controller.hasClients) return;
     controller.jumpToPage(page);
   }
 

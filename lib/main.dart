@@ -2,11 +2,15 @@ import 'dart:async';
 import 'package:desktop_webview_window/desktop_webview_window.dart';
 import 'package:dynamic_color/dynamic_color.dart';
 import 'package:flex_seed_scheme/flex_seed_scheme.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:venera/foundation/log.dart';
+import 'package:venera/foundation/native_diagnostics.dart';
+import 'package:venera/foundation/session_guard.dart';
 import 'package:venera/pages/auth_page.dart';
+import 'package:venera/pages/recovery_page.dart';
 import 'package:venera/pages/startup_page.dart';
 import 'package:venera/utils/io.dart';
 import 'package:venera/utils/translations.dart';
@@ -17,7 +21,7 @@ import 'components/window_frame.dart';
 import 'foundation/app.dart';
 import 'foundation/appdata.dart';
 import 'foundation/launcher_icon.dart';
-import 'foundation/ohos_follow_worker.dart';
+import 'foundation/follow_updates_worker.dart';
 import 'foundation/download_keepalive.dart';
 import 'foundation/shortcuts.dart';
 import 'foundation/tray.dart';
@@ -25,7 +29,7 @@ import 'headless.dart';
 import 'init.dart';
 
 @pragma('vm:entry-point')
-void followUpdatesBackgroundMain(List<String> args) => runOhosFollowWorker(args);
+void followUpdatesBackgroundMain(List<String> args) => runFollowUpdatesWorker(args);
 
 void main(List<String> args) {
   if (args.contains('--headless')) {
@@ -36,6 +40,11 @@ void main(List<String> args) {
   overrideIO(() {
     runZonedGuarded(() async {
       WidgetsFlutterBinding.ensureInitialized();
+      // A debug run is stopped from the IDE all the time, which is no crash.
+      if (!kDebugMode || const bool.fromEnvironment('SESSION_GUARD')) {
+        await SessionGuard.start();
+        if (SessionGuard.offerRecovery) await runRecovery();
+      }
       try {
         await init();
       } on PlatformException catch (error) {
@@ -55,7 +64,9 @@ void main(List<String> args) {
         ));
         return;
       }
+      SessionGuard.step('init');
       runApp(const MyApp());
+      SessionGuard.appStarted();
       if (App.isDesktop) {
         await windowManager.ensureInitialized();
         AppShortcuts.install();
@@ -104,6 +115,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     App.registerForceRebuild(forceRebuild);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     WidgetsBinding.instance.addObserver(this);
+    if (App.isOhos) unawaited(readOhosNativeDiagnostics());
     syncOhosStartupTheme();
     syncReaderNightModeWithSystem(rebuild: false);
     super.initState();
@@ -131,6 +143,9 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && App.isOhos) {
+      unawaited(readOhosNativeDiagnostics());
+    }
     if (state == AppLifecycleState.resumed && App.isMobile) {
       DownloadKeepAlive.instance.onResume();
     }

@@ -40,6 +40,10 @@ $appVersion = $versionLine.Matches[0].Groups[1].Value
 if ($appVersion -notmatch '^([^+]+)\+(\d+)$') { throw "Invalid application version: $appVersion" }
 $versionName = $Matches[1]
 $versionCode = [int]$Matches[2]
+# Match Flutter OH's validatedBuildNameForPlatform for native versionName.
+$ohosVersionParts = @(($versionName -replace '[^\d.]', '') -split '\.' | Where-Object { $_ -ne '' })
+while ($ohosVersionParts.Count -lt 3) { $ohosVersionParts += '0' }
+$ohosVersionName = $ohosVersionParts -join '.'
 
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 if (Get-ChildItem -LiteralPath $OutputDirectory -Filter '*.hap') {
@@ -53,8 +57,9 @@ $nativeLibraries = @(
     'libqjs.so', 'librhttp.so', 'libsqlite3.so', 'libzip_flutter.so'
 )
 $targets = @(
-    @{ Platform = 'ohos-arm64'; Abi = 'arm64-v8a'; Name = 'arm64' },
-    @{ Platform = 'ohos-x64'; Abi = 'x86_64'; Name = 'x64-emulator' }
+    # All HarmonyOS devices are ARM64; only the x86_64 host emulator needs x64.
+    @{ Platform = 'ohos-arm64'; Abi = 'arm64-v8a'; Name = 'harmonyos' },
+    @{ Platform = 'ohos-x64'; Abi = 'x86_64'; Name = 'harmonyos-emulator-x64' }
 )
 $buildScript = Join-Path $checkoutRoot 'tool/build_ohos.ps1'
 $sources = Join-Path $checkoutRoot '.dart_tool/ohos/sources'
@@ -79,8 +84,8 @@ foreach ($target in $targets) {
         $reader = [IO.StreamReader]::new($manifestEntry.Open())
         try { $manifest = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
         $app = $manifest.app
-        if ($app.versionName -ne $versionName -or $app.versionCode -ne $versionCode) {
-            throw "Packaged version does not match $appVersion."
+        if ($app.versionName -ne $ohosVersionName -or $app.versionCode -ne $versionCode) {
+            throw "Packaged version does not match $appVersion (expected $ohosVersionName/$versionCode)."
         }
         if ($app.bundleName -ne 'com.github.kyosee.venera' -or
             $app.debug -ne $false -or $app.buildMode -ne 'release') {
@@ -101,7 +106,7 @@ foreach ($target in $targets) {
     } finally {
         $archive.Dispose()
     }
-    $filename = "VeneraX-$appVersion-harmonyos-$($target.Name)-unsigned.hap"
+    $filename = "VeneraX-$appVersion-$($target.Name)-unsigned.hap"
     Copy-Item -LiteralPath $builtHap -Destination (Join-Path $OutputDirectory $filename)
     Write-Host "Verified $filename (release, $($target.Abi))."
 }

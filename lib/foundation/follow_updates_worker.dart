@@ -7,11 +7,13 @@ import 'package:venera/foundation/background_follow_queue.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/follow_update_scope.dart';
+import 'package:venera/foundation/follow_update_result.dart';
 import 'package:venera/foundation/follow_updates.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/js_engine.dart';
-import 'package:venera/foundation/ohos_follow_scheduler.dart';
+import 'package:venera/foundation/follow_updates_scheduler.dart';
 import 'package:venera/foundation/reading_widget.dart';
+import 'package:venera/foundation/onboarding.dart';
 import 'package:venera/network/app_dio_io.dart';
 import 'package:venera/network/cookie_jar.dart';
 import 'package:venera/utils/io.dart';
@@ -19,7 +21,7 @@ import 'package:venera/utils/data_sync.dart';
 import 'package:venera/utils/translations.dart';
 
 /// Runs only inside the native extension's exclusive data lease.
-void runOhosFollowWorker(List<String> args) {
+void runFollowUpdatesWorker(List<String> args) {
   overrideIO(() {
     runZonedGuarded(
       () async {
@@ -27,7 +29,7 @@ void runOhosFollowWorker(List<String> args) {
         App.isBackgroundTask = true;
         Log.isMuted = true;
         var cancelled = false;
-        const channel = OhosFollowScheduler.channel;
+        const channel = FollowUpdatesScheduler.channel;
         channel.setMethodCallHandler((call) async {
           if (call.method == 'stop') cancelled = true;
         });
@@ -51,6 +53,11 @@ void runOhosFollowWorker(List<String> args) {
           }
           markStage('data');
           App.initBackgroundTask(args[0], args[1], args[2]);
+          await OnboardingStore.instance.load(App.dataPath);
+          if (OnboardingStore.instance.blocksAutomaticTasks) {
+            outcome = 'disabled';
+            return;
+          }
           await appdata.init();
           if (!FollowUpdateScope.isConfigured ||
               !FollowUpdateScope.isPastFixedTime(
@@ -62,15 +69,8 @@ void runOhosFollowWorker(List<String> args) {
           }
           markStage('translation');
           await AppTranslation.init();
-          markStage('network');
-          await nativeInitRhttp();
           markStage('stores');
-          await SingleInstanceCookieJar.createInstance();
           await LocalFavoritesManager().init();
-          await App.domain.init(App.dataPath);
-          markStage('sources');
-          await JsEngine().init();
-          await ComicSourceManager().init();
           if (cancelled) {
             outcome = 'cancelled';
             return;
@@ -88,7 +88,7 @@ void runOhosFollowWorker(List<String> args) {
               entry.comic.identityKey: entry.comic.updateTime,
           };
           final queue = BackgroundFollowQueue(
-            '${App.dataPath}/ohos_follow_queue.json',
+            '${App.dataPath}/${App.isOhos ? 'ohos' : 'android'}_follow_queue.json',
           );
           queue.reconcile(updateTimes);
           Future<void> notifyPending() async {
@@ -110,6 +110,22 @@ void runOhosFollowWorker(List<String> args) {
               )
               .map((entry) => entry.comic.identityKey)
               .toSet();
+          if (due.isEmpty || cancelled) {
+            outcome = cancelled ? 'cancelled' : 'checked';
+            return;
+          }
+          markStage('network');
+          await nativeInitRhttp();
+          await SingleInstanceCookieJar.createInstance();
+          // Keep migrations on the isolate owned by the native worker.
+          App.domain.initSync(App.dataPath);
+          markStage('sources');
+          await JsEngine().init();
+          await ComicSourceManager().init();
+          markStage('checks');
+          final updatedKeys = <String>{};
+          var failed = 0;
+          var checked = 0;
           while (!cancelled && due.isNotEmpty) {
             final batch = queue.takeBatch(due, updateTimes);
             if (batch.isEmpty) break;
@@ -121,8 +137,12 @@ void runOhosFollowWorker(List<String> args) {
                   entry.comic,
                   entry.folders,
                   shouldCancel: () => cancelled,
+                  requestTimeout: const Duration(seconds: 20),
                 );
                 queue.complete(key, updated: result.updated);
+                checked++;
+                if (result.updated) updatedKeys.add(key);
+                if (result.errorMessage != null) failed++;
                 if (result.errorMessage == null && !cancelled) {
                   DataSync().requestAutoUpload();
                 }
@@ -135,6 +155,13 @@ void runOhosFollowWorker(List<String> args) {
           }
           await notifyPending();
           outcome = cancelled ? 'cancelled' : 'checked';
+          if (!cancelled && due.isEmpty && checked > 0) {
+            await FollowUpdateResult(
+              checkedAt: DateTime.now(),
+              updatedKeys: updatedKeys,
+              failed: failed,
+            ).save();
+          }
           await ReadingWidgetService.instance.refresh(
             kinds: const [
               ReadingWidgetKind.following,

@@ -45,6 +45,7 @@ class ReaderImageProvider
     this.legacyTranslationKey,
     this.translationConfig,
     this.translated = false,
+    this.translationRevision = 0,
     this.comicTitle = '',
     this.comicCover = '',
     this.chapterTitle = '',
@@ -78,6 +79,7 @@ class ReaderImageProvider
   /// change the provider identity so the reader can swap the image in place
   /// once a background translation completes.
   final bool translated;
+  final int translationRevision;
 
   final String comicTitle;
   final String comicCover;
@@ -106,8 +108,10 @@ class ReaderImageProvider
     }
   }
 
-  @override
-  Future<Uint8List> load(chunkEvents, checkStop) async {
+  Future<Uint8List> loadOriginal({
+    void Function(ImageChunkEvent)? onChunk,
+    void Function()? checkStop,
+  }) async {
     Uint8List? imageBytes;
     if (imageKey.startsWith('file://')) {
       var file = File(imageKey);
@@ -123,8 +127,8 @@ class ReaderImageProvider
         cid,
         eid,
       )) {
-        checkStop();
-        chunkEvents.add(
+        checkStop?.call();
+        onChunk?.call(
           ImageChunkEvent(
             cumulativeBytesLoaded: event.currentBytes,
             expectedTotalBytes: event.totalBytes,
@@ -139,6 +143,15 @@ class ReaderImageProvider
     if (imageBytes == null) {
       throw "Error: Empty response body.";
     }
+    return imageBytes;
+  }
+
+  @override
+  Future<Uint8List> load(chunkEvents, checkStop) async {
+    var imageBytes = await loadOriginal(
+      onChunk: chunkEvents.add,
+      checkStop: checkStop,
+    );
     if (translationKey != null) {
       var config = translationConfig ?? TranslationConfig.of(cid, sourceKey);
       var chapter = ImageTranslationService.chapterIdentity(
@@ -162,7 +175,7 @@ class ReaderImageProvider
       var rendered = await resolveReaderTranslation(
         renderStored: () => ImageTranslationService.instance.renderStoredPage(
           translationKey!,
-          imageBytes!,
+          imageBytes,
           config.mode,
           chapter: chapter,
           legacyCacheKey: legacyTranslationKey,
@@ -178,7 +191,7 @@ class ReaderImageProvider
             translationKey!,
             cid,
             sourceKey,
-            imageBytes!,
+            imageBytes,
             config,
             () {
               ImageTranslationService.evictImage(this);
@@ -250,7 +263,7 @@ class ReaderImageProvider
         }
       }
     }
-    return imageBytes!;
+    return imageBytes;
   }
 
   @override
@@ -261,7 +274,7 @@ class ReaderImageProvider
   @override
   String get key =>
       "$imageKey@$sourceKey@$cid@$eid@$enableResize"
-      "${translationKey == null ? '' : '@tr:$translated'}";
+      "${translationKey == null ? '' : '@tr:$translationKey:$translated:$translationRevision'}";
 
   /// [key] carries resize/translation state that never reaches the disk entry,
   /// so it cannot double as the eviction key.
@@ -273,6 +286,54 @@ class ReaderImageProvider
   /// nothing about the server's encoding of the original.
   @override
   String? get fallbackUrl => translationKey == null ? imageKey : null;
+}
+
+/// The size a local page decodes to, read from the start of its file without
+/// decoding it; null when that part does not settle it.
+Future<Size?> readLocalImageSize(String path) async {
+  RandomAccessFile? file;
+  ui.ImmutableBuffer? buffer;
+  ui.ImageDescriptor? descriptor;
+  try {
+    if (path.startsWith('file://')) path = path.substring(7);
+    file = await File(path).open();
+    final head = await file.read(128 * 1024);
+    if (!_headGivesDecodedSize(head)) return null;
+    buffer = await ui.ImmutableBuffer.fromUint8List(head);
+    descriptor = await ui.ImageDescriptor.encoded(buffer);
+    return Size(descriptor.width.toDouble(), descriptor.height.toDouble());
+  } catch (_) {
+    return null;
+  } finally {
+    descriptor?.dispose();
+    buffer?.dispose();
+    await file?.close();
+  }
+}
+
+/// Formats whose rotation, if any, is stated before the image data. A cut
+/// off JPEG or PNG header fails to parse rather than giving a wrong size.
+bool _headGivesDecodedSize(Uint8List head) {
+  bool startsWith(int offset, List<int> bytes) {
+    if (head.length < offset + bytes.length) return false;
+    for (var i = 0; i < bytes.length; i++) {
+      if (head[offset + i] != bytes[i]) return false;
+    }
+    return true;
+  }
+
+  if (startsWith(0, const [0xFF, 0xD8, 0xFF]) ||
+      startsWith(0, const [0x89, 0x50, 0x4E, 0x47]) ||
+      startsWith(0, 'GIF8'.codeUnits) ||
+      startsWith(0, 'BM'.codeUnits)) {
+    return true;
+  }
+  if (startsWith(0, 'RIFF'.codeUnits) && startsWith(8, 'WEBP'.codeUnits)) {
+    // A WebP keeps its EXIF block after the image data.
+    if (!startsWith(12, 'VP8X'.codeUnits)) return true;
+    return head.length > 20 && (head[20] & 0x08) == 0;
+  }
+  return false;
 }
 
 /// Reads one page file from the local library.

@@ -16,12 +16,14 @@ import 'package:venera/foundation/js_engine.dart';
 import 'package:venera/foundation/launcher_icon.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/onboarding.dart';
-import 'package:venera/foundation/ohos_follow_scheduler.dart';
+import 'package:venera/foundation/follow_updates_scheduler.dart';
 import 'package:venera/foundation/related_source_tasks.dart';
 import 'package:venera/foundation/reading_widget.dart';
+import 'package:venera/foundation/session_guard.dart';
 import 'package:venera/network/app_dio_io.dart';
 import 'package:venera/network/cookie_jar.dart';
 import 'package:venera/pages/comic_source_page.dart';
+import 'package:venera/pages/diagnostics_page.dart';
 import 'package:venera/pages/follow_updates_page.dart';
 import 'package:venera/pages/settings/settings_page.dart';
 import 'package:venera/utils/app_links.dart';
@@ -49,9 +51,12 @@ extension _FutureInit<T> on Future<T> {
 /// Critical initialization that must complete before UI renders.
 /// Only includes what's needed for theme, locale, and basic app state.
 Future<void> init({bool interactive = true}) async {
-  await App.init().wait();
+  // The recovery page has already done this when it prepared a report.
+  if (!App.isInitialized) await App.init().wait();
+  // Has to happen during this launch: the next one overwrites that run's log.
+  unawaited(SessionGuard.archivePreviousRun());
   // Never load shared state before the background extension has released it.
-  await OhosFollowScheduler.acquireUiData();
+  await FollowUpdatesScheduler.acquireUiData();
   if (interactive) await OnboardingStore.instance.load(App.dataPath);
   await LauncherIconService.initialize().wait();
   if (App.isAndroid || App.isOhos || App.isIOS || App.isMacOS) {
@@ -104,6 +109,7 @@ Future<void> initDeferred() async {
   } catch (e, s) {
     Log.error("init", "$e\n$s");
   } finally {
+    SessionGuard.step('init.deferred');
     deferredInitCompleter.complete();
   }
 }
@@ -186,6 +192,8 @@ Future<void> _checkAppUpdates() async {
 }
 
 void checkUpdates() {
+  // Safe mode leaves out what the app would start by itself.
+  if (SessionGuard.safeMode) return;
   // Delay to make sure navigator context is ready for update dialogs.
   Future.delayed(const Duration(seconds: 2), _checkAppUpdates).wait();
   FollowUpdatesService.initChecker();
@@ -194,8 +202,13 @@ void checkUpdates() {
 
 /// Start navigation and scheduled work after setup, agreement and app unlock.
 void startInteractiveServices() {
-  _autoCleanHistory();
-  ReadingWidgetService.instance.start();
+  showAbnormalExitNotice();
+  if (SessionGuard.safeMode) {
+    showSafeModeNotice();
+  } else {
+    _autoCleanHistory();
+    ReadingWidgetService.instance.start();
+  }
   if (App.isAndroid) initAndroidExtras();
   if (App.isOhos) {
     handleLinks();

@@ -11,6 +11,7 @@ import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/js_engine.dart';
 import 'package:venera/foundation/local.dart';
+import 'package:venera/foundation/reading_widget.dart';
 import 'package:venera/utils/translations.dart';
 
 LocalComic _comic(String id, String title, Directory root) => LocalComic(
@@ -104,6 +105,71 @@ void main() {
     );
     expect(HistoryManager().find('201', ComicType.local)?.page, 30);
     expect(LocalManager().getComics(LocalSortType.lastRead).first.id, '201');
+  });
+
+  test('local widgets rank reading before the full library order', () async {
+    final manager = LocalManager();
+    final originalSort = manager.sortType;
+    try {
+      for (var i = 0; i < 24; i++) {
+        await manager.add(
+          _comic('widget-$i', 'Widget ${i.toString().padLeft(2, '0')}', root),
+          'widget-$i',
+        );
+      }
+      manager.sortType = LocalSortType.nameDesc;
+      HistoryManager().addHistory(
+        _record('widget-0', 'Widget 00', DateTime(2026, 11, 20)),
+      );
+      HistoryManager().addHistory(
+        _record('widget-1', 'Widget 01', DateTime(2026, 11, 19)),
+      );
+      final comics = await readingWidgetLocalComics();
+      expect(comics.take(2).map((c) => c.id), ['widget-0', 'widget-1']);
+      expect(
+        comics
+            .where((c) => c.id.startsWith('widget-'))
+            .skip(2)
+            .map((c) => c.id),
+        [for (var i = 23; i >= 2; i--) 'widget-$i'],
+      );
+    } finally {
+      manager.sortType = originalSort;
+    }
+  });
+
+  test('comic settings made on another device apply to this copy', () async {
+    const key = 'readerScreenPicNumberForLandscape';
+    final settings = appdata.settings;
+    final entries = settings['comicSpecificSettings'] as Map;
+    await LocalManager().add(_comic('206', 'Set elsewhere', root), '206');
+    HistoryManager().addHistory(
+      _record('106', 'Set elsewhere', DateTime(2026, 11, 10)),
+    );
+    settings.setEnabledComicSpecificSettings('106', 'local', true);
+    settings.setReaderSetting('106', 'local', key, 2);
+    expect(settings.isComicSpecificSettingsEnabled('206', 'local'), isFalse);
+
+    expect(HistoryManager().syncedLocalIds('206'), ['106']);
+    settings.shareSyncedComicSettings('206', 'local', ['106']);
+    expect(settings.isComicSpecificSettingsEnabled('206', 'local'), isTrue);
+    expect(settings.getReaderSetting('206', 'local', key), 2);
+    // Edits go to the entry the other device reads.
+    settings.setReaderSetting('206', 'local', key, 1);
+    expect(entries['106@local'][key], 1);
+    expect(entries.containsKey('206@local'), isFalse);
+    settings.resetComicReaderSettings('206@local');
+    expect(entries.containsKey('106@local'), isFalse);
+
+    // Settings this copy enabled itself stay its own.
+    settings.setEnabledComicSpecificSettings('107', 'local', true);
+    settings.setReaderSetting('107', 'local', key, 2);
+    settings.setEnabledComicSpecificSettings('207', 'local', true);
+    settings.shareSyncedComicSettings('207', 'local', ['107']);
+    expect(settings.getReaderSetting('207', 'local', key), isNot(2));
+    entries
+      ..remove('107@local')
+      ..remove('207@local');
   });
 
   test('ambiguous titles and ids in use here are never paired', () async {

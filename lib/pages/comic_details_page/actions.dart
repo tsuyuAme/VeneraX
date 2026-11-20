@@ -293,6 +293,7 @@ abstract mixin class _ComicPageActions {
         title: comic.title,
         cover: comic.cover,
         entries: entries,
+        author: comic.findAuthor(),
         groups: groups,
         finishSelect: startJob,
       ),

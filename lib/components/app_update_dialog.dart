@@ -11,8 +11,22 @@ import 'package:venera/utils/translations.dart';
 typedef PrepareAppUpdate =
     Future<PreparedAppUpdate> Function(
       CancelToken cancelToken,
-      ValueChanged<double?> onProgress,
+      ProgressCallback onProgress,
     );
+
+typedef PrepareDeltaAppUpdate =
+    Future<PreparedAppUpdate> Function(
+      CancelToken cancelToken,
+      ProgressCallback onProgress,
+      VoidCallback onPreparing,
+    );
+
+String _updateSize(int bytes) =>
+    '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MiB';
+
+class DeltaUpdateException implements Exception {
+  const DeltaUpdateException();
+}
 
 class PreparedAppUpdate {
   const PreparedAppUpdate({required this.install, required this.discard});
@@ -31,6 +45,9 @@ class AppUpdateDialog extends StatefulWidget {
     required this.onReleasePage,
     this.prepareUpdate,
     this.restartsAfterInstall = false,
+    this.prepareDeltaUpdate,
+    this.downloadSize = 0,
+    this.deltaSize = 0,
   });
 
   final String currentVersion;
@@ -39,6 +56,9 @@ class AppUpdateDialog extends StatefulWidget {
   final AsyncCallback onReleasePage;
   final PrepareAppUpdate? prepareUpdate;
   final bool restartsAfterInstall;
+  final PrepareDeltaAppUpdate? prepareDeltaUpdate;
+  final int downloadSize;
+  final int deltaSize;
 
   @override
   State<AppUpdateDialog> createState() => _AppUpdateDialogState();
@@ -51,8 +71,17 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
   _UpdatePhase _phase = _UpdatePhase.available;
   CancelToken? _cancelToken;
   PreparedAppUpdate? _preparedUpdate;
-  double? _progress;
+  int _received = 0;
+  int _total = 0;
   String? _error;
+  bool _useDelta = true;
+  bool _preparing = false;
+  bool _deltaFailed = false;
+
+  bool get _delta => _useDelta && widget.prepareDeltaUpdate != null;
+
+  double? get _progress =>
+      _preparing || _total <= 0 ? null : (_received / _total).clamp(0, 1);
 
   @override
   void dispose() {
@@ -69,14 +98,30 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
     _cancelToken = token;
     setState(() {
       _phase = _UpdatePhase.downloading;
-      _progress = null;
+      _received = 0;
+      _total = _delta ? widget.deltaSize : widget.downloadSize;
       _error = null;
+      _preparing = false;
     });
     try {
-      final prepared = await widget.prepareUpdate!(token, (value) {
+      void onProgress(int received, int total) {
         if (!mounted || token.isCancelled || _cancelToken != token) return;
-        setState(() => _progress = value?.clamp(0, 1));
-      });
+        setState(() {
+          _received = received;
+          _total = total;
+        });
+      }
+
+      final prepared = _delta
+          ? await widget.prepareDeltaUpdate!(token, onProgress, () {
+              if (!mounted || token.isCancelled || _cancelToken != token) {
+                return;
+              }
+              setState(() {
+                _preparing = true;
+              });
+            })
+          : await widget.prepareUpdate!(token, onProgress);
       if (!mounted || token.isCancelled || _cancelToken != token) {
         await prepared.discard();
         return;
@@ -89,7 +134,12 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
       if (!mounted || token.isCancelled || _cancelToken != token) return;
       setState(() {
         _phase = _UpdatePhase.failed;
-        _error = error is StateError
+        _deltaFailed = error is DeltaUpdateException;
+        if (_deltaFailed) _useDelta = false;
+        _error = _deltaFailed
+            ? 'Incremental update failed. Your current app is unchanged. Download the full package to continue.'
+                  .tl
+            : error is StateError
             ? error.message.toString()
             : 'Check your connection and try again'.tl;
       });
@@ -156,14 +206,21 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Padding(
-                    padding: EdgeInsets.fromLTRB(
-                      padding,
-                      compact ? 18 : (desktop ? 25 : 22),
-                      padding,
-                      compact ? 14 : (desktop ? 18 : 17),
+                  ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight: constraints.maxHeight * .25,
                     ),
-                    child: _header(colors, compact, desktop),
+                    child: SingleChildScrollView(
+                      child: Padding(
+                        padding: EdgeInsets.fromLTRB(
+                          padding,
+                          compact ? 18 : (desktop ? 25 : 22),
+                          padding,
+                          compact ? 14 : (desktop ? 18 : 17),
+                        ),
+                        child: _header(colors, compact, desktop),
+                      ),
+                    ),
                   ),
                   Flexible(
                     child: Padding(
@@ -231,7 +288,7 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
                       padding,
                       compact ? 18 : (desktop ? 22 : 20),
                     ),
-                    child: _footer(colors),
+                    child: _footer(colors, constraints.maxHeight * .32),
                   ),
                 ],
               ),
@@ -422,19 +479,21 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
     );
   }
 
-  Widget _footer(_UpdateColors colors) {
+  Widget _footer(_UpdateColors colors, double maxInfoHeight) {
     final downloading = _phase == _UpdatePhase.downloading;
     final ready = _phase == _UpdatePhase.ready;
     final failed = _phase == _UpdatePhase.failed;
     final external = widget.prepareUpdate == null;
     final secondary = downloading
-        ? 'Cancel download'
+        ? (_preparing ? 'Cancel update' : 'Cancel download')
         : (ready ? 'Install later' : 'Not now');
     final primary = external
         ? 'Go to release page'
         : (ready
               ? 'Install update'
-              : (failed ? 'Download again' : 'Update Now'));
+              : (_deltaFailed
+                    ? 'Download full package'
+                    : (failed ? 'Download again' : 'Update Now')));
     Widget action(String label, VoidCallback callback, {bool filled = false}) {
       return FilledButton(
         key: ValueKey(filled ? 'update-primary' : 'update-secondary'),
@@ -479,80 +538,132 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (downloading) ...[
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'Downloading update'.tl,
-                  style: const TextStyle(fontSize: 11),
-                ),
-              ),
-              if (_progress != null)
-                Text(
-                  '${(_progress! * 100).round()}%',
-                  style: TextStyle(fontSize: 11, color: colors.accent),
-                ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          LinearProgressIndicator(
-            value: _progress,
-            minHeight: 5,
-            color: colors.accent,
-            backgroundColor: colors.accentSoft,
-            borderRadius: BorderRadius.circular(9),
-            semanticsLabel: 'Downloading update'.tl,
-          ),
-          const SizedBox(height: 15),
-        ],
-        if (ready || failed)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 14),
-            child: Semantics(
-              liveRegion: true,
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Icon(
-                    ready
-                        ? Icons.check_circle_outline_rounded
-                        : Icons.error_outline_rounded,
-                    color: ready ? colors.accent : const Color(0xffca6371),
-                    size: 18,
+        ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: maxInfoHeight),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (!ready && widget.downloadSize > 0) ...[
+                  Text(
+                    'Download size: @size'.tlParams({
+                      'size': _updateSize(
+                        _delta ? widget.deltaSize : widget.downloadSize,
+                      ),
+                    }),
+                    style: TextStyle(fontSize: 11, color: colors.muted),
                   ),
-                  const SizedBox(width: 9),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          (ready
-                                  ? 'Your update is ready'
-                                  : 'Download interrupted')
+                  if (_delta)
+                    Text(
+                      'Incremental update saves @size'.tlParams({
+                        'size': _updateSize(
+                          widget.downloadSize - widget.deltaSize,
+                        ),
+                      }),
+                      style: TextStyle(fontSize: 11, color: colors.accent),
+                    ),
+                  const SizedBox(height: 8),
+                ],
+                if (downloading) ...[
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          (_preparing
+                                  ? 'Preparing update'
+                                  : 'Downloading update')
                               .tl,
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w600,
-                            fontSize: 11,
-                          ),
+                          style: const TextStyle(fontSize: 11),
                         ),
-                        const SizedBox(height: 3),
+                      ),
+                      if (_progress != null)
                         Text(
-                          ready
-                              ? (widget.restartsAfterInstall
-                                        ? 'The app will close to install, then restart'
-                                        : 'The system installer will open next')
-                                    .tl
-                              : _error!,
-                          style: TextStyle(color: colors.muted, fontSize: 10),
+                          '${(_progress! * 100).round()}%',
+                          style: TextStyle(fontSize: 11, color: colors.accent),
                         ),
-                      ],
+                    ],
+                  ),
+                  if (!_preparing) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      _total > 0
+                          ? '${_updateSize(_received)} / ${_updateSize(_total)}'
+                          : _updateSize(_received),
+                      key: const ValueKey('update-download-bytes'),
+                      style: TextStyle(fontSize: 11, color: colors.muted),
+                    ),
+                  ],
+                  const SizedBox(height: 10),
+                  LinearProgressIndicator(
+                    value: _progress,
+                    minHeight: 5,
+                    color: colors.accent,
+                    backgroundColor: colors.accentSoft,
+                    borderRadius: BorderRadius.circular(9),
+                    semanticsLabel:
+                        (_preparing ? 'Preparing update' : 'Downloading update')
+                            .tl,
+                  ),
+                  const SizedBox(height: 15),
+                ],
+                if (ready || failed)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 14),
+                    child: Semantics(
+                      liveRegion: true,
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            ready
+                                ? Icons.check_circle_outline_rounded
+                                : Icons.error_outline_rounded,
+                            color: ready
+                                ? colors.accent
+                                : const Color(0xffca6371),
+                            size: 18,
+                          ),
+                          const SizedBox(width: 9),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  (ready
+                                          ? 'Your update is ready'
+                                          : (_deltaFailed
+                                                ? 'Incremental update unavailable'
+                                                : 'Download interrupted'))
+                                      .tl,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 11,
+                                  ),
+                                ),
+                                const SizedBox(height: 3),
+                                Text(
+                                  ready
+                                      ? (widget.restartsAfterInstall
+                                                ? 'The app will close to install, then restart'
+                                                : 'The system installer will open next')
+                                            .tl
+                                      : _error!,
+                                  style: TextStyle(
+                                    color: colors.muted,
+                                    fontSize: 10,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
-                ],
-              ),
+              ],
             ),
           ),
+        ),
         Row(
           children: [
             Expanded(
@@ -568,6 +679,15 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
             ],
           ],
         ),
+        if (_delta && !downloading && !ready)
+          TextButton(
+            key: const ValueKey('update-full-package'),
+            onPressed: () => setState(() {
+              _useDelta = false;
+              _deltaFailed = false;
+            }),
+            child: Text('Use full package'.tl),
+          ),
         if (external)
           Padding(
             padding: const EdgeInsets.only(top: 12),

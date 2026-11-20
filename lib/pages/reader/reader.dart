@@ -42,6 +42,7 @@ import 'package:venera/foundation/image_translation/translation_service.dart';
 import 'package:venera/foundation/image_translation/translation_types.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/log.dart';
+import 'package:venera/foundation/session_guard.dart';
 import 'package:venera/foundation/read_later.dart';
 import 'package:venera/foundation/reading_statistics.dart';
 import 'package:venera/foundation/res.dart';
@@ -49,10 +50,12 @@ import 'package:venera/foundation/shortcuts.dart';
 import 'package:venera/foundation/wide_page_split.dart';
 import 'package:venera/network/download.dart';
 import 'package:venera/network/images.dart';
+import 'package:venera/pages/image_favorites_page/image_favorites_page.dart';
 import 'package:venera/pages/reader/auto_page_turning_button.dart';
 import 'package:venera/pages/reader/auto_scroll_activity.dart';
 import 'package:venera/pages/reader/continuous_page_turn_coordinator.dart';
 import 'package:venera/pages/reader/night_mode_button.dart';
+import 'package:venera/pages/reader/rotation_transition.dart';
 import 'package:venera/pages/reader/shader_image.dart';
 import 'package:venera/pages/settings/settings_page.dart';
 import 'package:venera/utils/clipboard_image.dart';
@@ -338,6 +341,14 @@ class _ReaderState extends State<Reader>
 
   @override
   void initState() {
+    SessionGuard.begin('reader');
+    if (type == ComicType.local) {
+      appdata.settings.shareSyncedComicSettings(
+        cid,
+        type.sourceKey,
+        HistoryManager().syncedLocalIds(cid),
+      );
+    }
     WidgetsBinding.instance.addObserver(this);
     _appIsForeground =
         WidgetsBinding.instance.lifecycleState == null ||
@@ -466,14 +477,12 @@ class _ReaderState extends State<Reader>
 
   @override
   void dispose() {
+    SessionGuard.end('reader');
     _stopReadingTimer();
+    _notifyReadingStatisticsChanged();
     App.rootRouteObserver.unsubscribe(this);
     WidgetsBinding.instance.removeObserver(this);
-    if (_updateHistoryTimer != null && history != null) {
-      _updateHistoryTimer!.cancel();
-      _updateHistoryTimer = null;
-      unawaited(HistoryManager().addHistoryAsync(history!));
-    }
+    unawaited(_flushReadingProgress());
     _disposeAutoPageTurning();
     _einkRefresher.dispose();
     focusNode.dispose();
@@ -481,9 +490,6 @@ class _ReaderState extends State<Reader>
     ImageTranslationService.instance.clearQueue();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     stopVolumeEvent();
-    Future.microtask(() {
-      DataSync().onDataChanged();
-    });
     PaintingBinding.instance.imageCache.maximumSizeBytes = 100 << 20;
     disposeReaderWindow();
     super.dispose();
@@ -497,6 +503,9 @@ class _ReaderState extends State<Reader>
     } else {
       _stopReadingTimer();
       _notifyReadingStatisticsChanged();
+    }
+    if (state == AppLifecycleState.paused) {
+      unawaited(_flushReadingProgress(sync: App.isAndroid));
     }
     // Inactive is still on screen: an unfocused desktop window, or a phone
     // with the notification shade pulled down.
@@ -701,6 +710,23 @@ class _ReaderState extends State<Reader>
   /// Prevent multiple history updates in a short time.
   /// `HistoryManager().addHistoryAsync` is a high-cost operation because it creates a new isolate.
   Timer? _updateHistoryTimer;
+  Future<void>? _historyWrite;
+
+  Future<void> _flushReadingProgress({bool sync = true}) async {
+    if (_updateHistoryTimer != null && history != null) {
+      _updateHistoryTimer!.cancel();
+      _updateHistoryTimer = null;
+      _historyWrite = HistoryManager().addHistoryAsync(history!);
+    }
+    try {
+      await _historyWrite;
+      if (sync && DataSync().syncMode == WebdavSyncMode.realtime) {
+        await DataSync().settlePendingChanges();
+      }
+    } catch (e, s) {
+      Log.error('Reader', 'Failed to save reading progress: $e', s);
+    }
+  }
 
   void updateHistory() {
     if (history != null) {
@@ -730,7 +756,7 @@ class _ReaderState extends State<Reader>
       history!.time = DateTime.now();
       _updateHistoryTimer?.cancel();
       _updateHistoryTimer = Timer(const Duration(seconds: 1), () {
-        HistoryManager().addHistoryAsync(history!);
+        _historyWrite = HistoryManager().addHistoryAsync(history!);
         _updateHistoryTimer = null;
       });
     }
@@ -977,7 +1003,11 @@ abstract mixin class _ImagePerPageHandler {
     _syncLayoutChapter();
     if (index < 0 || index >= (images?.length ?? 0)) return false;
     _imageSizes[index] = size;
-    if (size.width <= size.height || !_wideImages.add(index)) return false;
+    if (size.width <= size.height) {
+      // A size read from the file header that its decode contradicts.
+      return _wideImages.remove(index) && _layoutUsesWideImages;
+    }
+    if (!_wideImages.add(index)) return false;
     return _layoutUsesWideImages;
   }
 
@@ -1265,6 +1295,9 @@ abstract mixin class _ReaderLocation {
   }
 
   bool toPage(int page) {
+    // A chapter being loaded has no pager yet; the view still registered is
+    // the disposed one of the chapter before.
+    if (isLoading) return false;
     if (_validatePage(page)) {
       if (page == this.page && page != 1 && page != totalPages) {
         return false;

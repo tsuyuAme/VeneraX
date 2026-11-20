@@ -13,10 +13,13 @@ import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/download_keepalive.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/history.dart';
+import 'package:venera/foundation/image_translation/translation_store.dart';
 import 'package:venera/foundation/log.dart';
+import 'package:venera/foundation/session_guard.dart';
 import 'package:venera/foundation/sqlite_connection.dart';
 import 'package:venera/network/download.dart';
 import 'package:venera/pages/reader/reader.dart';
+import 'package:venera/utils/data_sync.dart';
 import 'package:venera/utils/io.dart';
 import 'package:venera/utils/translations.dart';
 
@@ -131,23 +134,15 @@ class LocalComic with HistoryMixin implements Comic {
     return times;
   }
 
+  /// Reads the folder on the calling isolate; use [loadLocalComicStatuses]
+  /// for more than one comic.
   LocalComicStatus get status {
     if (LocalManager().isDownloading(id, comicType)) {
       return LocalComicStatus.downloading;
     }
-    final dir = Directory(baseDir);
-    if (!dir.existsSync()) return LocalComicStatus.notDownloaded;
-    try {
-      final contents = dir.listSync();
-      if (contents.isEmpty) return LocalComicStatus.notDownloaded;
-      final hasContent = contents.any((e) =>
-          e is File || (e is Directory && e.listSync().isNotEmpty));
-      return hasContent
-          ? LocalComicStatus.downloaded
-          : LocalComicStatus.notDownloaded;
-    } catch (_) {
-      return LocalComicStatus.notDownloaded;
-    }
+    return _folderHasPages(baseDir)
+        ? LocalComicStatus.downloaded
+        : LocalComicStatus.notDownloaded;
   }
 
   @override
@@ -237,6 +232,57 @@ class LocalComic with HistoryMixin implements Comic {
 
   @override
   double? get stars => null;
+}
+
+/// Whether [path] holds a page: a file, or a folder that is not empty.
+bool _folderHasPages(String path) {
+  try {
+    final dir = Directory(path);
+    if (!dir.existsSync()) return false;
+    return dir.listSync().any(
+      (e) => e is File || (e is Directory && e.listSync().isNotEmpty),
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+List<bool> _foldersWithPages(List<String> paths) =>
+    overrideIO(() => [for (final path in paths) _folderHasPages(path)]);
+
+// Kept apart so the isolate closure captures nothing but [paths].
+Future<List<bool>> _checkFoldersInBackground(List<String> paths) =>
+    Isolate.run(() => _foldersWithPages(paths));
+
+/// [LocalComic.status] of each of [comics], with the folders read on a
+/// background isolate. A folder picked on Android is listed through the
+/// system document provider, a slow query per folder; run on the UI thread
+/// for a whole list, it froze the app (#349).
+Future<List<LocalComicStatus>> loadLocalComicStatuses(
+  List<LocalComic> comics,
+) async {
+  final statuses = List.filled(comics.length, LocalComicStatus.notDownloaded);
+  final indexes = <int>[];
+  final paths = <String>[];
+  for (var i = 0; i < comics.length; i++) {
+    final comic = comics[i];
+    if (LocalManager().isDownloading(comic.id, comic.comicType)) {
+      statuses[i] = LocalComicStatus.downloading;
+    } else {
+      indexes.add(i);
+      paths.add(comic.baseDir);
+    }
+  }
+  if (paths.isEmpty) return statuses;
+  try {
+    final found = await _checkFoldersInBackground(paths);
+    for (var j = 0; j < indexes.length; j++) {
+      if (found[j]) statuses[indexes[j]] = LocalComicStatus.downloaded;
+    }
+  } catch (e) {
+    Log.warning('Local Comics', 'Unable to check comic folders: $e');
+  }
+  return statuses;
 }
 
 /// Keeps flat local-comic history attached to chapter IDs after a rescan.
@@ -510,6 +556,8 @@ class LocalManager with ChangeNotifier {
   /// up to the configured parallelism. Tasks the user manually paused stay
   /// paused (wasRunning was persisted as false for them).
   void _autoResumeDownloads() {
+    // Safe mode: the queue is restored, and stays paused until the user says.
+    if (SessionGuard.safeMode) return;
     final limit = _maxParallelDownloads;
     var started = 0;
     for (final t in downloadingTasks) {
@@ -649,6 +697,19 @@ class LocalManager with ChangeNotifier {
     notifyListeners();
   }
 
+  /// The library's order, shared by its page and the home preview (#351).
+  /// Kept on this device only.
+  LocalSortType get sortType => LocalSortType.fromString(
+    appdata.implicitData['local_sort']?.toString() ?? 'default',
+  );
+
+  set sortType(LocalSortType value) {
+    if (value == sortType) return;
+    appdata.implicitData['local_sort'] = value.value;
+    unawaited(appdata.writeImplicitData());
+    notifyListeners();
+  }
+
   List<LocalComic> getComics(LocalSortType sortType) {
     if (sortType == LocalSortType.lastRead) {
       return _getComicsSortedByLastRead();
@@ -681,14 +742,25 @@ class LocalManager with ChangeNotifier {
     return res.map((row) => LocalComic.fromRow(row)).toList();
   }
 
+  /// Every comic in the library, without reading the rest of its row.
+  List<ComicID> allComicIds() => [
+    for (final row in _db.select('SELECT id, comic_type FROM comics;'))
+      ComicID(ComicType(row['comic_type'] as int), row['id'] as String),
+  ];
+
   List<LocalComic> getComicsByStatus(LocalComicStatus status, LocalSortType sortType) {
     return getComics(sortType).where((c) => c.status == status).toList();
   }
 
-  bool hasComicsWithImages() {
-    return getComics(LocalSortType.defaultSort).any(
-      (c) => c.status == LocalComicStatus.downloaded,
-    );
+  Future<bool> hasComicsWithImages() async {
+    final comics = getComics(LocalSortType.defaultSort);
+    for (var start = 0; start < comics.length; start += 20) {
+      final statuses = await loadLocalComicStatuses(
+        comics.skip(start).take(20).toList(),
+      );
+      if (statuses.contains(LocalComicStatus.downloaded)) return true;
+    }
+    return false;
   }
 
   List<LocalComic> _getComicsSortedByAuthor() {
@@ -830,6 +902,20 @@ class LocalManager with ChangeNotifier {
       }
       return a.name.compareTo(b.name);
     });
+    // Native local comics use their own files as the complete chapter.
+    // Downloaded remote comics may be missing pages and must use source totals.
+    if (comic.comicType == ComicType.local) {
+      final chapterId = comic.hasChapters
+          ? (ep is int ? comic.chapters!.ids.elementAt(ep - 1) : ep as String)
+          : '0';
+      final store = TranslationStore();
+      if (store.recordChapterPageCount(
+            'local', comic.id, chapterId, files.length,
+          ) &&
+          store.hasTranslationsForComic('local', comic.id)) {
+        DataSync().onTranslationsChanged();
+      }
+    }
     return files.map((e) => "file://${e.path}").toList();
   }
 

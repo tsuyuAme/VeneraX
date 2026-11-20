@@ -7,6 +7,8 @@ import 'package:shimmer_animation/shimmer_animation.dart';
 import 'package:sliver_tools/sliver_tools.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 import 'package:venera/components/components.dart';
+import 'package:venera/components/translation_progress_surface.dart';
+import 'package:venera/pages/tasks_page.dart';
 import 'package:venera/components/related_sources_dialog.dart';
 import 'package:venera/components/rich_comment_content.dart';
 import 'package:venera/foundation/app.dart';
@@ -15,6 +17,7 @@ import 'package:venera/foundation/chapter_duplicates.dart';
 import 'package:venera/foundation/comic_collection_store.dart';
 import 'package:venera/foundation/comic_details_cache.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
+import 'package:venera/foundation/comic_source/collection_source.dart';
 import 'package:venera/foundation/comic_state_repository.dart';
 import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/domain_database.dart';
@@ -35,6 +38,7 @@ import 'package:venera/foundation/image_provider/local_comic_image.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/network/download.dart';
+import 'package:venera/utils/data_sync.dart';
 import 'package:venera/network/cache.dart';
 import 'package:venera/pages/aggregated_search_page.dart';
 import 'package:venera/pages/comic_collection_edit_page.dart';
@@ -71,6 +75,10 @@ part 'cover_viewer.dart';
 part 'download_chapter_picker.dart';
 
 part 'pre_translate_chapter_picker.dart';
+
+part 'translation_workspace.dart';
+
+part 'translation_workspace_layout.dart';
 
 const double _comicDetailsWideBreakpoint = 760;
 

@@ -14,6 +14,7 @@ import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/read_later.dart';
 import 'package:venera/foundation/log.dart';
+import 'package:venera/foundation/session_guard.dart';
 import 'package:venera/foundation/onboarding.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/network/app_dio_io.dart';
@@ -107,7 +108,7 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
       );
       return;
     }
-    if (OnboardingStore.instance.blocksAutomaticTasks || initialRestoreDeferred) return;
+    if (_automaticTasksBlocked) return;
     var result = await downloadData();
     // Startup settle (#114): pay an account the previous run left open (a
     // killed process, or an iOS session that never got a background settle).
@@ -227,30 +228,26 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
       );
 
   Future<void> setSyncMode(WebdavSyncMode mode, {bool settle = true}) {
+    _pendingAutoUpload?.cancel();
+    _pendingAutoUpload = null;
+    _pendingSettleTimer?.cancel();
+    _pendingSettleTimer = null;
     appdata.implicitData[_syncModeKey] = mode.name;
     // Keep the legacy boolean coherent: QR config payloads and downgraded
     // installs still read it.
     appdata.implicitData['webdavAutoSync'] = mode != WebdavSyncMode.manual;
     final saved = appdata.writeImplicitData();
-    if (mode != WebdavSyncMode.dataSaver) {
-      _pendingSettleTimer?.cancel();
-      _pendingSettleTimer = null;
-    }
     // Entering an automatic tier with an open account settles it now — this
     // also covers dataSaver→realtime, where no timer would ever fire again.
     if (settle) {
       settlePendingChanges();
-    } else {
-      // Saving a connection starts one explicit initial sync instead.
-      _pendingAutoUpload?.cancel();
-      _pendingAutoUpload = null;
     }
     notifyListeners();
     return saved;
   }
 
   /// True when local changes exist that no successful upload has covered yet.
-  /// Maintained by the dataSaver/manual tiers (realtime uploads immediately);
+  /// Maintained by every tier, including batched realtime uploads;
   /// drives the home sync button's badge and every settle decision. Persisted
   /// so a killed process still owes — and pays — its account on next launch.
   bool get hasPendingChanges =>
@@ -258,7 +255,7 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
 
   void _markPendingChanges() {
     _pendingChangesEpoch++;
-    if (syncMode == WebdavSyncMode.dataSaver) {
+    if (syncMode != WebdavSyncMode.manual) {
       _armPendingSettleTimer();
     }
     if (hasPendingChanges) return; // already persisted; skip the IO churn
@@ -271,7 +268,11 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
     // ??= — the clock runs from the FIRST unsynced change. Later changes must
     // not extend it, or continuous reading would defer the settle forever and
     // void the "at most N minutes stale" guarantee.
-    _pendingSettleTimer ??= Timer(_dataSaverMaxPendingAge, () {
+    if (App.isBackgroundTask || syncMode == WebdavSyncMode.manual) return;
+    final maxAge = syncMode == WebdavSyncMode.realtime
+        ? const Duration(seconds: 30)
+        : _dataSaverMaxPendingAge;
+    _pendingSettleTimer ??= Timer(maxAge, () {
       _pendingSettleTimer = null;
       settlePendingChanges();
     });
@@ -359,7 +360,7 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
     }
   }
 
-  /// Uploads the pending account if one is open. The data-saver settle
+  /// Uploads the pending account if one is open. Automatic settle
   /// points all funnel here: background/screen-off (Android), resume,
   /// startup, the [_dataSaverMaxPendingAge] cap, desktop window close and
   /// the post-catch-up-download hook. No-op when clean, unconfigured, in
@@ -367,7 +368,7 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
   /// before the initial sync completed, or while an upload is already in
   /// flight (it carries the account).
   Future<void> settlePendingChanges() async {
-    if (OnboardingStore.instance.blocksAutomaticTasks || initialRestoreDeferred) return;
+    if (_automaticTasksBlocked) return;
     if (syncMode == WebdavSyncMode.manual) return;
     if (!hasPendingChanges) return;
     if (!isConfigured) return;
@@ -378,7 +379,7 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
     // Failed, or superseded by changes that landed mid-upload: re-arm so a
     // quiet session still retries within the staleness bound instead of
     // waiting for the next change or lifecycle event.
-    if (hasPendingChanges && syncMode == WebdavSyncMode.dataSaver) {
+    if (hasPendingChanges && syncMode != WebdavSyncMode.manual) {
       _armPendingSettleTimer();
     }
   }
@@ -390,7 +391,7 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
   /// import, headless CLI) do not come through here — they call
   /// [uploadData] with `force: true` directly.
   void requestAutoUpload() {
-    if (OnboardingStore.instance.blocksAutomaticTasks || initialRestoreDeferred) return;
+    if (_automaticTasksBlocked) return;
     if (!isConfigured) return;
     if (_isApplyingBackup) return;
     if (App.isBackgroundTask) {
@@ -400,20 +401,22 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
       }
       return;
     }
+    _markPendingChanges();
     switch (syncMode) {
       case WebdavSyncMode.realtime:
         _pendingAutoUpload?.cancel();
-        _pendingAutoUpload = Timer(const Duration(seconds: 2), () {
+        // Allow short reading pauses without publishing a whole backup.
+        // The independent 30s timer bounds continuous changes.
+        _pendingAutoUpload = Timer(const Duration(seconds: 15), () {
           _pendingAutoUpload = null;
-          if (_isApplyingBackup) return;
-          uploadData();
+          settlePendingChanges();
         });
       case WebdavSyncMode.dataSaver:
       case WebdavSyncMode.manual:
         // Deferred tiers keep an account instead of a network round-trip:
         // dataSaver settles it at the session boundaries, manual only via
         // the sync button (the flag still drives its badge).
-        _markPendingChanges();
+        break;
     }
   }
 
@@ -434,12 +437,14 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
       _pendingAutoUpload?.cancel();
       _pendingAutoUpload = null;
     }
-    // Data-saver keeps its account open for the whole session, and desktop
+    // Automatic tiers can have pending data at exit, and desktop
     // has no `paused` lifecycle moment — the window close IS its settle
     // point. Manual mode is deliberately absent: the user opted out of every
     // automatic upload.
     var hasOpenAccount =
-        syncMode == WebdavSyncMode.dataSaver && hasPendingChanges;
+        syncMode != WebdavSyncMode.manual &&
+        hasPendingChanges &&
+        !SessionGuard.safeMode;
     if (hasPendingDebounce || hasOpenAccount) {
       // Flush the pending change before exit. Deliberately NOT forced: if this
       // device is behind the server, uploading would overwrite newer remote
@@ -462,7 +467,10 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
     showLoadingDialog(
       App.rootContext,
       cancelButtonText: "Shut Down".tl,
-      onCancel: () => exit(0),
+      onCancel: () {
+        SessionGuard.markCleanExit();
+        exit(0);
+      },
       barrierDismissible: false,
       message: "Syncing Data".tl,
     );
@@ -472,6 +480,7 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
         _isSyncingImages) {
       await Future.delayed(const Duration(milliseconds: 50));
     }
+    SessionGuard.markCleanExit();
     exit(0);
   }
 
@@ -479,17 +488,44 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
 
   factory DataSync() => instance ?? (instance = DataSync._());
 
-  bool _isDownloading = false;
+  // The three flags double as steps in the run record: an interrupted sync is
+  // the first thing to rule in or out when a run ends abnormally.
+  static void _note(String activity, bool running) =>
+      running ? SessionGuard.begin(activity) : SessionGuard.end(activity);
+
+  bool _downloading = false;
+
+  bool get _isDownloading => _downloading;
+
+  set _isDownloading(bool value) {
+    if (value != _downloading) _note('sync.download', value);
+    _downloading = value;
+  }
 
   bool get isDownloading => _isDownloading;
 
-  bool _isUploading = false;
+  bool _uploading = false;
+
+  bool get _isUploading => _uploading;
+
+  set _isUploading(bool value) {
+    if (value != _uploading) _note('sync.upload', value);
+    _uploading = value;
+  }
 
   bool get isUploading => _isUploading;
 
   bool _haveWaitingTask = false;
 
-  bool _isSyncingImages = false;
+  bool _syncingImages = false;
+
+  bool get _isSyncingImages => _syncingImages;
+
+  set _isSyncingImages(bool value) {
+    if (value != _syncingImages) _note('sync.images', value);
+    _syncingImages = value;
+  }
+
   bool get isSyncingImages => _isSyncingImages;
 
   /// True while a downloaded/imported backup is being applied to the local
@@ -662,6 +698,13 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
   bool get initialRestoreDeferred =>
       appdata.implicitData['webdavSetupRestorePending'] == true;
 
+  /// Nothing syncs by itself before onboarding is done, while the first
+  /// restore is put off, or in safe mode. Explicit syncs are unaffected.
+  bool get _automaticTasksBlocked =>
+      OnboardingStore.instance.blocksAutomaticTasks ||
+      initialRestoreDeferred ||
+      SessionGuard.safeMode;
+
   bool _hasCompletedInitialSync() {
     if (initialRestoreDeferred) return false;
     return appdata.implicitData['hasCompletedInitialSync'] == true ||
@@ -789,6 +832,8 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
 
     _pendingAutoUpload?.cancel();
     _pendingAutoUpload = null;
+    _pendingSettleTimer?.cancel();
+    _pendingSettleTimer = null;
     if (_haveWaitingTask) return const Res(true);
     // Waits for image sync too: exportAppData snapshots local.db while image
     // sync may be importing packs into it. Image sync yields between comics
@@ -1111,6 +1156,7 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
       }
     } finally {
       _isUploading = false;
+      if (hasPendingChanges) _armPendingSettleTimer();
       _maybeStopSyncKeepAlive();
       notifyListeners();
     }
@@ -1596,7 +1642,7 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
   Timer? _imageSyncTimer;
 
   void _scheduleImageSync() {
-    if (OnboardingStore.instance.blocksAutomaticTasks || initialRestoreDeferred) return;
+    if (_automaticTasksBlocked) return;
     if (!_shouldSyncImages()) return;
     _imageSyncTimer?.cancel();
     _imageSyncTimer = Timer(const Duration(seconds: 30), () {
@@ -1699,7 +1745,11 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
 
       File? file;
       try {
-        file = await exportVeneraComics([comic], includeImages: true);
+        file = await exportVeneraComics(
+          [comic],
+          includeImages: true,
+          includeTranslations: false,
+        );
         // Streamed: image packs are whole comic archives (often hundreds of
         // MB) — buffering one in RAM via readAsBytes was an OOM in waiting.
         await BackgroundKeepAlive.instance.runTransfer(
@@ -1762,7 +1812,7 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
             '/venera-comics/$fileName', localFile.path, onProgress: progress,
           ),
         );
-        await importVeneraComics(localFile);
+        await importVeneraComics(localFile, importTranslations: false);
         Log.info("Image Sync", "Downloaded: ${comic.title}");
       } catch (e, s) {
         failures++;

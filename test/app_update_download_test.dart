@@ -32,7 +32,7 @@ void main() {
   Future<void> download(
     ResponseBody body, {
     CancelToken? token,
-    void Function(double?)? progress,
+    ProgressCallback? progress,
     int size = 0,
   }) async {
     final dio = Dio()..httpClientAdapter = _ResponseAdapter(body);
@@ -42,7 +42,7 @@ void main() {
         url: 'https://updates.invalid/package.zip',
         destination: file,
         cancelToken: token ?? CancelToken(),
-        onProgress: progress ?? (_) {},
+        onProgress: progress ?? (_, _) {},
         expectedSize: size,
       );
     } finally {
@@ -50,8 +50,38 @@ void main() {
     }
   }
 
+  test(
+    'stale update attempts are reclaimed without touching other files',
+    () async {
+      final updates = Directory('${directory.path}/updates')..createSync();
+      final old = Directory('${updates.path}/download-old')..createSync();
+      File(
+        '${old.path}/VeneraX-1.0.1-windows.zip',
+      ).writeAsStringSync('package');
+      final unrelated = Directory('${updates.path}/keep')..createSync();
+      final updater = File('${updates.path}/venera_updater.exe')
+        ..writeAsStringSync('updater');
+      final namedLikeAttempt = File('${updates.path}/download-file')
+        ..writeAsStringSync('not a directory');
+
+      await removeStaleUpdateAttempts(updates);
+      expect(old.existsSync(), isTrue, reason: 'a fresh attempt may be in use');
+
+      await removeStaleUpdateAttempts(
+        updates,
+        now: DateTime.now().add(const Duration(days: 2)),
+      );
+      expect(old.existsSync(), isFalse);
+      expect(unrelated.existsSync(), isTrue);
+      expect(updater.existsSync(), isTrue);
+      expect(namedLikeAttempt.existsSync(), isTrue);
+
+      await removeStaleUpdateAttempts(Directory('${directory.path}/missing'));
+    },
+  );
+
   test('writes complete package and reports progress', () async {
-    final progress = <double?>[];
+    final progress = <(int, int)>[];
     await download(
       ResponseBody.fromBytes(
         [1, 2, 3, 4],
@@ -60,18 +90,65 @@ void main() {
           'content-length': ['4'],
         },
       ),
-      progress: progress.add,
+      progress: (received, total) => progress.add((received, total)),
     );
     expect(await file.readAsBytes(), [1, 2, 3, 4]);
-    expect(progress.last, 1);
+    expect(progress.last, (4, 4));
   });
 
   test('unknown package length uses indeterminate progress', () async {
-    final progress = <double?>[];
-    await download(ResponseBody.fromBytes([1, 2], 200), progress: progress.add);
+    final progress = <(int, int)>[];
+    await download(
+      ResponseBody.fromBytes([1, 2], 200),
+      progress: (received, total) => progress.add((received, total)),
+    );
     expect(progress, isNotEmpty);
-    expect(progress.every((value) => value == null), isTrue);
+    expect(progress.last, (2, 0));
     expect(await file.length(), 2);
+  });
+
+  test('expected asset size overrides a misleading content length', () async {
+    final progress = <(int, int)>[];
+    await expectLater(
+      download(
+        ResponseBody.fromBytes(
+          [1, 2],
+          200,
+          headers: {
+            'content-length': ['2'],
+          },
+        ),
+        size: 4,
+        progress: (received, total) => progress.add((received, total)),
+      ),
+      throwsA(isA<HttpException>()),
+    );
+    expect(file.existsSync(), isFalse);
+    expect(progress.last, (2, 4));
+  });
+
+  test('asset size supplies total bytes without a content length', () async {
+    final progress = <(int, int)>[];
+    await download(
+      ResponseBody(
+        Stream.fromIterable([
+          Uint8List.fromList([1, 2]),
+          Uint8List.fromList([3, 4]),
+        ]),
+        200,
+      ),
+      size: 4,
+      progress: (received, total) => progress.add((received, total)),
+    );
+    expect(progress, [(2, 4), (4, 4)]);
+  });
+
+  test('oversized responses are stopped and removed', () async {
+    await expectLater(
+      download(ResponseBody.fromBytes([1, 2, 3, 4], 200), size: 2),
+      throwsA(isA<HttpException>()),
+    );
+    expect(file.existsSync(), isFalse);
   });
 
   test(
@@ -97,7 +174,7 @@ void main() {
         200,
       );
       await expectLater(
-        download(body, token: token, size: 4, progress: (_) => token.cancel()),
+        download(body, token: token, size: 4, progress: (_, _) => token.cancel()),
         throwsA(isA<DioException>()),
       );
       expect(await file.exists(), isFalse);

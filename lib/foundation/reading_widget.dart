@@ -18,6 +18,7 @@ import 'comic_state_repository.dart';
 import 'comic_type.dart';
 import 'favorites.dart';
 import 'follow_update_scope.dart';
+import 'follow_update_result.dart';
 import 'follow_update_tasks.dart';
 import 'history.dart';
 import 'image_provider/base_image_provider.dart';
@@ -96,26 +97,59 @@ List<FavoriteItemWithUpdateInfo> readingWidgetFollowedComics() {
   return items;
 }
 
+Future<List<LocalComic>> readingWidgetLocalComics() async {
+  if (!App.local.isInitialized) return [];
+  final sort = App.local.sortType;
+  var comics = App.local.getComics(
+    sort.isSize || sort == LocalSortType.lastRead
+        ? LocalSortType.defaultSort
+        : sort,
+  );
+  if (sort.isSize) {
+    comics = await sortLocalComicsBySize(
+      comics,
+      descending: sort == LocalSortType.sizeDesc,
+    );
+  }
+  final readAt = [
+    for (final comic in comics)
+      App.history.isInitialized
+          ? App.history
+                    .find(comic.id, comic.comicType)
+                    ?.time
+                    .millisecondsSinceEpoch ??
+                0
+          : 0,
+  ];
+  final indexes = List.generate(comics.length, (index) => index)
+    ..sort((a, b) {
+      final byReading = readAt[b].compareTo(readAt[a]);
+      return byReading != 0 ? byReading : a.compareTo(b);
+    });
+  return [for (final index in indexes) comics[index]];
+}
+
 /// Publishes a small native snapshot; no source credentials or remote URLs leave
 /// Dart. Each refresh invalidates older thumbnail work before it can publish.
 class ReadingWidgetService with WidgetsBindingObserver {
   ReadingWidgetService({
     List<Comic> Function()? recent,
     List<FavoriteItemWithUpdateInfo> Function()? following,
-    List<LocalComic> Function()? local,
+    FutureOr<List<LocalComic>> Function()? local,
+    FollowUpdateResult? Function()? lastCheck,
     bool Function(Comic)? visible,
     this.coverBytes,
   }) : _recent = recent ?? (() => HistoryManager().getRecent()),
        _following = following ?? readingWidgetFollowedComics,
-       _local =
-           local ??
-           (() => App.local.isInitialized ? App.local.getRecent() : []),
+       _local = local ?? readingWidgetLocalComics,
+       _lastCheck = lastCheck ?? (() => FollowUpdateResult.latest),
        _visible = visible ?? isReadingWidgetHistoryVisible;
 
   static final instance = ReadingWidgetService();
   final List<Comic> Function() _recent;
   final List<FavoriteItemWithUpdateInfo> Function() _following;
-  final List<LocalComic> Function() _local;
+  final FutureOr<List<LocalComic>> Function() _local;
+  final FollowUpdateResult? Function() _lastCheck;
   final bool Function(Comic) _visible;
   final Future<Uint8List> Function(Comic)? coverBytes;
   final Map<String, String> _covers = {};
@@ -124,6 +158,15 @@ class ReadingWidgetService with WidgetsBindingObserver {
   int _revision = 0;
   bool _started = false;
 
+  /// The app is in front, so the home screen and its cards are out of sight.
+  bool _foreground = true;
+
+  /// Data changed since the cards were last published.
+  bool _stale = false;
+
+  /// The lock state the cards last showed; null before the first publish.
+  bool? _publishedLocked;
+
   void start() {
     if (_started ||
         App.isBackgroundTask ||
@@ -131,38 +174,50 @@ class ReadingWidgetService with WidgetsBindingObserver {
       return;
     }
     _started = true;
-    HistoryManager().addListener(_schedule);
-    App.local.addListener(_schedule);
-    App.favorites.addListener(_schedule);
-    ComicSourceManager().addListener(_schedule);
-    appdata.settings.addListener(_schedule);
-    appdata.addListener(_schedule);
-    DataSync().addListener(_schedule);
-    FollowUpdateTaskManager.instance.addListener(_schedule);
+    final state = WidgetsBinding.instance.lifecycleState;
+    _foreground = state == null || state == AppLifecycleState.resumed;
+    HistoryManager().addListener(onDataChanged);
+    App.local.addListener(onDataChanged);
+    App.favorites.addListener(onDataChanged);
+    ComicSourceManager().addListener(onDataChanged);
+    appdata.settings.addListener(onDataChanged);
+    appdata.addListener(onDataChanged);
+    DataSync().addListener(onDataChanged);
+    FollowUpdateTaskManager.instance.addListener(onDataChanged);
     WidgetsBinding.instance.addObserver(this);
-    _schedule();
+    onDataChanged();
   }
 
-  void _schedule() {
+  /// While the app is in front a change only marks the cards out of date;
+  /// they are published once the app leaves the screen. A refresh after every
+  /// page turn, upload and settings save held the UI thread (#352, #355).
+  /// Locking or unlocking is published at once.
+  @visibleForTesting
+  void onDataChanged() {
+    final locked = appdata.settings['authorizationRequired'] == true;
+    if (locked ? _publishedLocked != true : _publishedLocked == true) {
+      _timer?.cancel();
+      unawaited(refresh());
+      return;
+    }
+    // Locked cards show nothing that could change.
+    if (locked) return;
+    _stale = true;
+    if (_foreground) return;
     ++_revision;
     _timer?.cancel();
-    if (appdata.settings['authorizationRequired'] == true) {
-      unawaited(refresh());
-    } else {
-      _timer = Timer(
-        const Duration(milliseconds: 500),
-        () => unawaited(refresh()),
-      );
-    }
+    _timer = Timer(
+      const Duration(milliseconds: 500),
+      () => unawaited(refresh()),
+    );
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    _foreground = state == AppLifecycleState.resumed;
     _timer?.cancel();
-    if (state == AppLifecycleState.resumed ||
-        state == AppLifecycleState.inactive) {
-      unawaited(refresh());
-    }
+    if (_foreground || !_stale) return;
+    unawaited(refresh());
   }
 
   Future<void> refresh({
@@ -172,6 +227,12 @@ class ReadingWidgetService with WidgetsBindingObserver {
     final revision = ++_revision;
     try {
       final locked = appdata.settings['authorizationRequired'] == true;
+      _publishedLocked = locked;
+      if (ReadingWidgetKind.values.every(kinds.contains)) _stale = false;
+      // Started first: the folder check runs while the other kinds publish.
+      final localCheck = locked || !kinds.contains(ReadingWidgetKind.local)
+          ? null
+          : (_readableLocal(revision)..ignore());
       if (!locked) _restoreCovers();
       final followed =
           locked ||
@@ -182,24 +243,26 @@ class ReadingWidgetService with WidgetsBindingObserver {
               )
           ? <FavoriteItemWithUpdateInfo>[]
           : _following();
+      final lastCheck = locked || !kinds.contains(ReadingWidgetKind.updates)
+          ? null
+          : _lastCheck();
       final collections =
           <ReadingWidgetKind, List<Comic>>{
             ReadingWidgetKind.history:
                 locked || !kinds.contains(ReadingWidgetKind.history)
                 ? []
                 : _recent(),
-            ReadingWidgetKind.following: followed,
-            ReadingWidgetKind.updates: followed
+            ReadingWidgetKind.following: followed
                 .where((item) => item.hasNewUpdate == true)
                 .toList(),
-            ReadingWidgetKind.local:
-                locked || !kinds.contains(ReadingWidgetKind.local)
-                ? []
-                : _local()
-                      .where(
-                        (item) => item.status != LocalComicStatus.notDownloaded,
-                      )
-                      .toList(),
+            ReadingWidgetKind.updates: followed
+                .where(
+                  (item) =>
+                      lastCheck?.updatedKeys?.contains(item.identityKey) ==
+                      true,
+                )
+                .toList(),
+            ReadingWidgetKind.local: const [],
           }.map(
             (kind, comics) =>
                 MapEntry(kind, comics.where(_visible).take(6).toList()),
@@ -208,7 +271,7 @@ class ReadingWidgetService with WidgetsBindingObserver {
         0,
         (latest, item) => math.max(latest, item.lastCheckTime ?? 0),
       );
-      final checkText = checked == 0
+      String checkText(int checked) => checked == 0
           ? 'Not checked yet'.tl
           : 'Last checked: @t'.tlParams({
               't': DateTime.fromMillisecondsSinceEpoch(
@@ -217,6 +280,11 @@ class ReadingWidgetService with WidgetsBindingObserver {
             });
       final snapshots = <ReadingWidgetKind, Map<String, Object>>{};
       for (final kind in kinds) {
+        if (kind == ReadingWidgetKind.local && localCheck != null) {
+          final local = await localCheck;
+          if (local == null || revision != _revision) return;
+          collections[kind] = local.where(_visible).take(6).toList();
+        }
         final comics = collections[kind]!;
         final snapshot = <String, Object>{
           'kind': kind.name,
@@ -224,14 +292,18 @@ class ReadingWidgetService with WidgetsBindingObserver {
           'title': switch (kind) {
             ReadingWidgetKind.history => 'Recent reading'.tl,
             ReadingWidgetKind.following => 'Follow Updates'.tl,
-            ReadingWidgetKind.updates => 'New updates'.tl,
+            ReadingWidgetKind.updates => 'Latest check'.tl,
             ReadingWidgetKind.local => 'Local comics'.tl,
           },
           'subtitle':
               !locked &&
                   (kind == ReadingWidgetKind.following ||
                       kind == ReadingWidgetKind.updates)
-              ? checkText
+              ? checkText(
+                  kind == ReadingWidgetKind.updates
+                      ? lastCheck?.checkedAt.millisecondsSinceEpoch ?? 0
+                      : checked,
+                )
               : '',
           'emptyText': locked
               ? 'Open VeneraX to view comics'.tl
@@ -239,9 +311,16 @@ class ReadingWidgetService with WidgetsBindingObserver {
                   ReadingWidgetKind.history =>
                     'Read a comic to keep your place here.'.tl,
                   ReadingWidgetKind.following =>
-                    'Add favorites to your follow list to see them here.'.tl,
+                    'No unread updates. Open your follow list to check.'.tl,
                   ReadingWidgetKind.updates =>
-                    'No new updates. Open your follow list to check.'.tl,
+                    lastCheck?.updatedKeys == null
+                        ? 'Run a check to see its results here.'.tl
+                        : lastCheck!.failed > 0
+                        ? 'Some comics could not be checked. Open your follow list to retry.'
+                              .tl
+                        : lastCheck.updatedKeys!.isEmpty
+                        ? 'The latest check found no updates.'.tl
+                        : 'No updates to show from the latest check.'.tl,
                   ReadingWidgetKind.local =>
                     'Import or download comics to read them here.'.tl,
                 },
@@ -313,7 +392,48 @@ class ReadingWidgetService with WidgetsBindingObserver {
     } on MissingPluginException {
       // Desktop and older platform hosts have no home-screen widget bridge.
     } catch (_) {
+      _stale = true;
       Log.warning('Reading widget', 'Unable to update reading widgets.');
+    }
+  }
+
+  Future<List<LocalComic>>? _localCheck;
+
+  /// Local comics whose folders still hold pages, or null once a newer refresh
+  /// took over. One check at a time: refreshes come in bursts (resume,
+  /// follow-update progress) and every check lists each folder.
+  Future<List<LocalComic>?> _readableLocal(int revision) async {
+    while (_localCheck != null) {
+      await _localCheck!.then((_) {}, onError: (_) {});
+      if (revision != _revision) return null;
+    }
+    final check = _localCheck = () async {
+      final comics = (await _local()).where(_visible).toList();
+      final readable = <LocalComic>[];
+      // Stop after filling the snapshot; a large library need not be scanned.
+      for (
+        var start = 0;
+        start < comics.length && readable.length < 6;
+        start += 20
+      ) {
+        if (revision != _revision) break;
+        final batch = comics.sublist(
+          start,
+          math.min(start + 20, comics.length),
+        );
+        final statuses = await loadLocalComicStatuses(batch);
+        for (var i = 0; i < batch.length; i++) {
+          if (statuses[i] != LocalComicStatus.notDownloaded) {
+            readable.add(batch[i]);
+          }
+        }
+      }
+      return readable;
+    }();
+    try {
+      return await check;
+    } finally {
+      if (identical(_localCheck, check)) _localCheck = null;
     }
   }
 

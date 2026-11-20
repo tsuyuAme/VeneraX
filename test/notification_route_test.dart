@@ -3,6 +3,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/pages/auth_page.dart';
+import 'package:venera/pages/downloading_page.dart';
+import 'package:venera/pages/local_comics_page.dart';
 import 'package:venera/pages/main_page.dart';
 import 'package:venera/pages/tasks_page.dart';
 import 'package:venera/utils/handle_notification_route.dart';
@@ -26,6 +28,20 @@ Future<GlobalKey<NavigatorState>> _pumpMainPage(WidgetTester tester) async {
   return mainNavigatorKey;
 }
 
+class _EntryA extends StatelessWidget {
+  const _EntryA();
+
+  @override
+  Widget build(BuildContext context) => const Text('entry-a');
+}
+
+class _EntryB extends StatelessWidget {
+  const _EntryB();
+
+  @override
+  Widget build(BuildContext context) => const Text('entry-b');
+}
+
 void _pushRoot(String label) {
   App.rootNavigatorKey.currentState!.push(
     MaterialPageRoute<void>(builder: (_) => Scaffold(body: Text(label))),
@@ -41,6 +57,13 @@ void main() {
   tearDown(() {
     App.mainNavigatorKey = null;
     AuthPage.isActive = false;
+  });
+
+  test('download notifications open the queue, or the library once done', () {
+    // Route strings are shared with the Android and HarmonyOS notifications.
+    expect(pageForRoute('downloading'), isA<DownloadingPage>());
+    expect(pageForRoute('local'), isA<LocalComicsPage>());
+    expect(pageForRoute('unknown'), isNull);
   });
 
   testWidgets(
@@ -124,6 +147,34 @@ void main() {
     mainNavigatorKey.currentState!.pop();
     await tester.pumpAndSettle();
     expect(mainNavigatorKey.currentState!.canPop(), isFalse);
+  });
+
+  testWidgets('entry pages sit right above the main page, one copy each', (
+    tester,
+  ) async {
+    final mainNavigatorKey = await _pumpMainPage(tester);
+    final navigator = mainNavigatorKey.currentState!;
+
+    showEntryPage(navigator, const _EntryA());
+    await tester.pumpAndSettle();
+    navigator.push(
+      MaterialPageRoute<void>(builder: (_) => const Text('details')),
+    );
+    await tester.pumpAndSettle();
+    // The open copy comes back and what was opened from it closes.
+    showEntryPage(navigator, const _EntryA());
+    await tester.pumpAndSettle();
+    expect(find.text('details'), findsNothing);
+    expect(find.text('entry-a'), findsOneWidget);
+
+    // Another entry page replaces it instead of stacking on top.
+    showEntryPage(navigator, const _EntryB());
+    await tester.pumpAndSettle();
+    expect(find.text('entry-b'), findsOneWidget);
+    navigator.pop();
+    await tester.pumpAndSettle();
+    expect(find.text('main-home'), findsOneWidget);
+    expect(navigator.canPop(), isFalse);
   });
 
   testWidgets('the favorites shortcut switches to the favorites tab', (

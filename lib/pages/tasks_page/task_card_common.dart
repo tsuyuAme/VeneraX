@@ -132,6 +132,7 @@ mixin _TaskCardCommon on State<TasksPage> {
         'data_sync_upload' => Icons.cloud_upload,
         'data_sync_download' => Icons.cloud_download,
         'pre_translate' => Icons.translate,
+        'comic_download' => Icons.download,
         _ => Icons.task,
       };
     }
@@ -156,6 +157,7 @@ mixin _TaskCardCommon on State<TasksPage> {
       'data_sync_upload' => "WebDAV Upload".tl,
       'data_sync_download' => "WebDAV Download".tl,
       'pre_translate' => "Pre-translate: @title".tlParams(params),
+      'comic_download' => "Download: @title".tlParams(params),
       _ => taskType,
     };
   }
@@ -164,21 +166,26 @@ mixin _TaskCardCommon on State<TasksPage> {
     required List<Widget> children,
     String? title,
     Widget? titleTrailing,
+    Color? backgroundColor,
   }) {
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.fromLTRB(16, 8, 16, 16),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: context.colorScheme.surfaceContainerLow,
+        color: backgroundColor ?? context.colorScheme.surfaceContainerLow,
         borderRadius: BorderRadius.circular(8),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
+          OverflowBar(
+            alignment: MainAxisAlignment.spaceBetween,
+            overflowAlignment: OverflowBarAlignment.end,
+            spacing: 8,
+            overflowSpacing: 8,
             children: [
-              Expanded(child: Text(title ?? "By comic source".tl, style: ts.s16)),
+              Text(title ?? "By comic source".tl, style: ts.s16),
               if (titleTrailing != null) titleTrailing,
             ],
           ),

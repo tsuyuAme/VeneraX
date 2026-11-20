@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:isolate';
 
-import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/foundation.dart' show listEquals, visibleForTesting;
 import 'package:sqlite3/sqlite3.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
@@ -13,11 +13,15 @@ import 'package:venera/foundation/comic_state_repository.dart';
 import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/domain_database.dart';
 import 'package:venera/foundation/favorites.dart';
+import 'package:venera/foundation/follow_update_scope.dart';
 import 'package:venera/foundation/history.dart';
+import 'package:venera/foundation/image_translation/translation_performance_config.dart';
 import 'package:venera/foundation/image_translation/translation_service.dart';
 import 'package:venera/foundation/image_translation/translation_store.dart';
 import 'package:venera/foundation/log.dart';
+import 'package:venera/foundation/session_guard.dart';
 import 'package:venera/foundation/local.dart';
+import 'package:venera/foundation/follow_updates_scheduler.dart';
 import 'package:venera/foundation/sqlite_connection.dart';
 import 'package:venera/foundation/source_platform.dart';
 import 'package:venera/network/cookie_jar.dart';
@@ -281,6 +285,19 @@ Future<File> exportAppData({
   bool sync = true,
   bool includeLocalComics = true,
   bool includeTranslations = true,
+}) => SessionGuard.during(
+  'backup.export',
+  () => _exportAppData(
+    sync: sync,
+    includeLocalComics: includeLocalComics,
+    includeTranslations: includeTranslations,
+  ),
+);
+
+Future<File> _exportAppData({
+  required bool sync,
+  required bool includeLocalComics,
+  required bool includeTranslations,
 }) async {
   var time = DateTime.now().millisecondsSinceEpoch ~/ 1000;
   var cacheFilePath = FilePath.join(App.cachePath, '$time.venera');
@@ -303,33 +320,7 @@ Future<File> exportAppData({
   // zip step reads the database files directly — neither may overlap a
   // close→swap→reopen restore window.
   await DatabaseGateway.instance.guardedRead(() async {
-  try {
-    if (App.domain.isInitialized) {
-      App.domain.db.execute('PRAGMA wal_checkpoint(TRUNCATE);');
-    }
-  } catch (e, s) {
-    Log.warning('Export Data', 'Failed to checkpoint domain database: $e\n$s');
-  }
-  for (final dbName in [
-    'history.db',
-    'local_favorite.db',
-    'local.db',
-    'read_later.db',
-    // Finished per-page translation text (durable, user-cleared). Riding the
-    // backup lets another device render a page without re-paying OCR + LLM.
-    'image_translation.db',
-    // Without a checkpoint, logins living in cookie.db's WAL sidecar were
-    // silently missing from every backup.
-    'cookie.db',
-  ]) {
-    try {
-      final db = openRawDatabase(FilePath.join(App.dataPath, dbName));
-      db.execute('PRAGMA wal_checkpoint(TRUNCATE);');
-      db.dispose();
-    } catch (e, s) {
-      Log.warning('Export Data', 'Failed to checkpoint $dbName: $e\n$s');
-    }
-  }
+  final checkpointDomain = App.domain.isInitialized;
   // Serialize the learned legacy-int -> source-key registry so orphan data
   // (sources that may not be installed on the importing device) can still be
   // resolved after migration. Built in the main isolate; the zip write below
@@ -349,15 +340,56 @@ Future<File> exportAppData({
   // in whole, as it always did.
   var keptComicIds = coreDataStoresReady ? _keptDomainComicIds() : null;
   var domainSnapshot = FilePath.join(App.cachePath, 'domain_$time.db');
+  var translationSnapshot = FilePath.join(App.cachePath, 'translations_$time.db');
   String? snapshotError;
+  var checkpointWarnings = <String>[];
   try {
-  snapshotError = await Isolate.run(() {
+  // Uploads follow every few page turns; checkpoints fsync, so they stay off
+  // the UI thread (#352).
+  (snapshotError, checkpointWarnings) = await Isolate.run(() {
     String? error;
+    var warnings = <String>[];
+    var domainFile = DomainDatabase.databasePathFor(dataPath);
+    for (final path in [
+      if (checkpointDomain) domainFile,
+      for (final dbName in [
+        'history.db',
+        'local_favorite.db',
+        'local.db',
+        'read_later.db',
+        // Finished per-page translation text (durable, user-cleared). Riding
+        // the backup lets another device render a page without re-paying
+        // OCR + LLM.
+        'image_translation.db',
+        // Without a checkpoint, logins living in cookie.db's WAL sidecar were
+        // silently missing from every backup.
+        'cookie.db',
+      ])
+        FilePath.join(dataPath, dbName),
+    ]) {
+      if (!File(path).existsSync()) continue;
+      try {
+        final db = openRawDatabase(path);
+        db.execute('PRAGMA wal_checkpoint(TRUNCATE);');
+        db.dispose();
+      } catch (e, s) {
+        warnings.add(
+          'Failed to checkpoint ${File(path).name}: $e\n$s',
+        );
+      }
+    }
+    var translationStoreFile = FilePath.join(dataPath, "image_translation.db");
+    final hasTranslations = includeTranslations && File(translationStoreFile).existsSync();
+    if (hasTranslations) {
+      TranslationStore.writeSyncSnapshot(
+        sourcePath: translationStoreFile,
+        targetPath: translationSnapshot,
+      );
+    }
     var zipFile = ZipFile.open(cacheFilePath);
     var coverDirName = ComicCollectionStore.coverDirName;
     var historyFile = FilePath.join(dataPath, "history.db");
     var localFavoriteFile = FilePath.join(dataPath, "local_favorite.db");
-    var domainFile = DomainDatabase.databasePathFor(dataPath);
     var appdataFile = FilePath.join(dataPath, appdataName);
     var cookies = FilePath.join(dataPath, "cookie.db");
     // Every entry is existence-guarded: a single missing file used to abort the
@@ -378,9 +410,8 @@ Future<File> exportAppData({
         translationPrefsBytes,
       );
     }
-    var translationStoreFile = FilePath.join(dataPath, "image_translation.db");
-    if (includeTranslations && File(translationStoreFile).existsSync()) {
-      zipFile.addFile("image_translation.db", translationStoreFile);
+    if (hasTranslations) {
+      zipFile.addFile("image_translation.db", translationSnapshot);
     }
     if (File(domainFile).existsSync()) {
       var domainEntry = domainFile;
@@ -413,7 +444,7 @@ Future<File> exportAppData({
     var sourceDir = Directory(FilePath.join(dataPath, "comic_source"));
     if (sourceDir.existsSync()) {
       for (var file in sourceDir.listSync()) {
-        if (file is File) {
+        if (file is File && !file.name.endsWith('.tmp')) {
           zipFile.addFile("comic_source/${file.name}", file.path);
         }
       }
@@ -430,10 +461,14 @@ Future<File> exportAppData({
       }
     }
     zipFile.close();
-    return error;
+    return (error, warnings);
   });
   } finally {
     await File(domainSnapshot).deleteIgnoreError();
+    await File(translationSnapshot).deleteIgnoreError();
+  }
+  for (final warning in checkpointWarnings) {
+    Log.warning('Export Data', warning);
   }
   if (snapshotError != null) {
     Log.warning('Export Data', 'Packed the whole domain database: $snapshotError');
@@ -444,19 +479,19 @@ Future<File> exportAppData({
 
 /// Domain comics a backup carries: every comic kept, read or timed here.
 /// The rest of the domain database is this device's browsing cache.
+/// Runs on the UI thread before each upload, so it reads ids only.
 Set<String> _keptDomainComicIds() {
   const repository = ComicStateRepository();
   String domainId(String sourceKey, String comicId) =>
       repository.identityFor(sourceKey, comicId).comicId;
+  final comics = <ComicID>{
+    ...HistoryManager().recordedComics(),
+    ...LocalFavoritesManager().allComicIds(),
+    ...LocalManager().allComicIds(),
+    for (final comic in App.readLater.getAll()) ComicID(comic.type, comic.id),
+  };
   return {
-    for (final comic in HistoryManager().recordedComics())
-      domainId(comic.type.sourceKey, comic.id),
-    for (final comic in LocalFavoritesManager().getAllComics())
-      domainId(comic.sourceKey, comic.id),
-    for (final comic in LocalManager().getComics(LocalSortType.name))
-      domainId(comic.sourceKey, comic.id),
-    for (final comic in App.readLater.getAll())
-      domainId(comic.sourceKey, comic.id),
+    for (final comic in comics) domainId(comic.type.sourceKey, comic.id),
     for (final collection in ComicCollectionStore.all())
       for (final member in collection.members)
         domainId(member.sourceKey, member.comicId),
@@ -467,12 +502,19 @@ Set<String> _keptDomainComicIds() {
 /// glossary, blocked terms). It lives in implicitData, which is NOT part of
 /// appdata.json, so it is serialized out explicitly to ride the backup. Import
 /// applies it back (see [_importTranslationPrefs]).
-Uint8List? _translationPrefsBytes() {
+Uint8List? _translationPrefsBytes({List<(String, String)>? comics}) {
+  final keys = comics?.map((comic) => '${comic.$2}@${comic.$1}').toSet();
   final prefs = <String, dynamic>{};
   for (final key in ImageTranslationService.syncedPrefKeys) {
     final value = appdata.implicitData[key];
     if (value is Map && value.isNotEmpty) {
-      prefs[key] = value;
+      final filtered = keys == null
+          ? value
+          : {
+              for (final entry in value.entries)
+                if (keys.contains(entry.key)) entry.key: entry.value,
+            };
+      if (filtered.isNotEmpty) prefs[key] = filtered;
     }
   }
   return prefs.isEmpty ? null : utf8.encode(jsonEncode(prefs));
@@ -485,9 +527,14 @@ const translationExportMarker = 'venera_translations.json';
 /// Packs every stored page translation and per-comic translation state into a
 /// `.venera` archive for another device's "Import App Data". Returns null when
 /// nothing is stored.
-Future<File?> exportTranslations() async {
+Future<File?> exportTranslations({List<(String, String)>? comics}) async {
   var store = TranslationStore();
-  var pages = store.count;
+  final selected = comics?.toSet();
+  var pages = selected == null
+      ? store.count
+      : store.comics
+          .where((comic) => selected.contains((comic.sourceKey, comic.comicId)))
+          .fold<int>(0, (sum, comic) => sum + comic.pageCount);
   if (pages == 0) return null;
   var stamp = DateTime.now().microsecondsSinceEpoch;
   var workDir = Directory(
@@ -497,12 +544,12 @@ Future<File?> exportTranslations() async {
   var output = File(FilePath.join(App.cachePath, 'translations_$stamp.venera'));
   try {
     var snapshot = FilePath.join(workDir.path, 'image_translation.db');
-    await store.exportSnapshot(snapshot);
+    await store.exportSnapshot(snapshot, comics: comics);
     await _zipTranslationExport(
       output.path,
       snapshot,
       utf8.encode(jsonEncode({'type': 'translations', 'version': 1, 'pages': pages})),
-      _translationPrefsBytes(),
+      _translationPrefsBytes(comics: comics),
     );
   } catch (_) {
     output.deleteIgnoreError();
@@ -555,30 +602,68 @@ bool _isWebdavConfigComplete(dynamic config) {
   return config.cast<String>().every((e) => e.trim().isNotEmpty);
 }
 
-/// Restores the WebDAV configuration from an imported backup, but only when the
-/// current device has no usable configuration.
-///
-/// WebDAV credentials are device-specific and therefore excluded from
-/// [Appdata.syncData], so a normal import never touches them. We make a
-/// deliberate exception here: if this device is unconfigured — or only
-/// partially configured (any of url/user/password blank) — and the backup
-/// carries a complete configuration, adopt it. A device that already has a
-/// complete configuration keeps its own.
-Future<void> _restoreWebdavConfigIfAbsent(Map<String, dynamic> data) async {
-  if (_isWebdavConfigComplete(appdata.settings['webdav'])) {
-    return;
+const _translationPerformanceKeys = [
+  TranslationPerformanceConfig.settingKey,
+  'imageTranslationPreBatchPages',
+  'imageTranslationOcrWorkers',
+  'imageTranslationImageConcurrency',
+  'imageTranslationLlmConcurrency',
+];
+
+/// Adopts the device-local settings a picked backup carries — WebDAV account,
+/// followed folders, translation performance — wherever this device has not
+/// set its own. [Appdata.syncData] skips these keys and sync backups never
+/// hold them; only a full export does.
+Future<void> _restoreDeviceSettingsIfAbsent(Map<String, dynamic> data) async {
+  final settings = data['settings'];
+  if (settings is! Map) return;
+  var changed = false;
+
+  final webdav = settings['webdav'];
+  if (!_isWebdavConfigComplete(appdata.settings['webdav']) &&
+      _isWebdavConfigComplete(webdav)) {
+    // Verbatim: the password is not trimmed.
+    appdata.settings['webdav'] = (webdav as List).cast<String>().toList();
+    changed = true;
   }
-  var settings = data['settings'];
-  if (settings is! Map) {
-    return;
+
+  var followRestored = false;
+  if (!FollowUpdateScope.isConfigured) {
+    final all = settings[FollowUpdateScope.allFoldersKey] == true;
+    final raw = settings[FollowUpdateScope.foldersKey];
+    var folders = raw is List ? raw.whereType<String>().toList() : <String>[];
+    final legacy = settings[FollowUpdateScope.legacyFolderKey];
+    if (!all && folders.isEmpty && legacy is String && legacy.isNotEmpty) {
+      folders = [legacy];
+    }
+    if (all || folders.isNotEmpty) {
+      appdata.settings[FollowUpdateScope.allFoldersKey] = all;
+      appdata.settings[FollowUpdateScope.foldersKey] = folders;
+      followRestored = changed = true;
+    }
   }
-  var incoming = settings['webdav'];
-  if (!_isWebdavConfigComplete(incoming)) {
-    return;
+
+  // Only the default preset counts as unset: its values come from the preset.
+  final preset = settings[TranslationPerformanceConfig.settingKey];
+  if (TranslationPerformanceConfig.current ==
+          TranslationPerformancePreset.balanced &&
+      preset is String &&
+      TranslationPerformanceConfig.fromSetting(preset) !=
+          TranslationPerformancePreset.balanced) {
+    for (final key in _translationPerformanceKeys) {
+      if (settings.containsKey(key)) appdata.settings[key] = settings[key];
+    }
+    changed = true;
   }
-  // Preserve values verbatim (e.g. don't trim the password).
-  appdata.settings['webdav'] = (incoming as List).cast<String>().toList();
-  await appdata.saveData(false);
+
+  if (changed) await appdata.saveData(false);
+  if (followRestored) {
+    // As the follow-updates settings dialog does for newly followed folders.
+    for (final folder in FollowUpdateScope.folders()) {
+      LocalFavoritesManager().prepareTableForFollowUpdates(folder, false);
+    }
+    unawaited(FollowUpdatesScheduler.sync());
+  }
 }
 
 /// Serializes concurrent [importAppData] runs. A WebDAV download-apply and a
@@ -606,8 +691,9 @@ class ImportOutcome {
 /// marks an import the user asked for (not a background sync): its translations
 /// outrank deletions recorded on this device. A file from [exportTranslations]
 /// is recognized and only merged, whatever the flags.
-/// [restoreWebdavConfig] is false during setup: importing local data must not
-/// silently connect this device to a server from the backup.
+/// [restoreDeviceSettings] is for a file the user picked: the WebDAV account,
+/// followed folders and translation performance it carries fill in whatever
+/// this device has not set. Sync keeps those per device.
 Future<ImportOutcome> importAppData(
   File file, {
   bool checkVersion = false,
@@ -616,7 +702,8 @@ Future<ImportOutcome> importAppData(
   bool restoreLocalComics = true,
   bool mergeTranslations = true,
   bool userRestore = false,
-  bool restoreWebdavConfig = true,
+  bool restoreDeviceSettings = false,
+  bool requireTranslationsOnly = false,
 }) async {
   while (_importInProgress != null) {
     // Wait for the other import to fully finish (ignore its outcome).
@@ -624,6 +711,7 @@ Future<ImportOutcome> importAppData(
   }
   final completer = Completer<void>();
   _importInProgress = completer.future;
+  SessionGuard.begin('backup.import');
   try {
     return await _importAppDataLocked(
       file,
@@ -633,9 +721,11 @@ Future<ImportOutcome> importAppData(
       restoreLocalComics: restoreLocalComics,
       mergeTranslations: mergeTranslations,
       userRestore: userRestore,
-      restoreWebdavConfig: restoreWebdavConfig,
+      restoreDeviceSettings: restoreDeviceSettings,
+      requireTranslationsOnly: requireTranslationsOnly,
     );
   } finally {
+    SessionGuard.end('backup.import');
     _importInProgress = null;
     completer.complete();
   }
@@ -711,6 +801,31 @@ Map<dynamic, dynamic> mergeTranslationPrefs(
   };
 }
 
+/// Compare source scripts and persisted accounts before restarting every source.
+@visibleForTesting
+Future<bool> comicSourceFilesEqual(Directory incoming, Directory live) async {
+  if (!await live.exists()) return false;
+  Future<Map<String, File>> files(Directory directory) async => {
+    await for (final file in directory.list(followLinks: false))
+      if (file is File &&
+          (file.name.endsWith('.js') || file.name.endsWith('.data')))
+        file.name: file,
+  };
+  final newFiles = await files(incoming);
+  final oldFiles = await files(live);
+  if (newFiles.length != oldFiles.length) return false;
+  for (final entry in newFiles.entries) {
+    final old = oldFiles[entry.key];
+    if (old == null || await old.length() != await entry.value.length()) {
+      return false;
+    }
+    if (!listEquals(await old.readAsBytes(), await entry.value.readAsBytes())) {
+      return false;
+    }
+  }
+  return true;
+}
+
 Future<ImportOutcome> _importAppDataLocked(
   File file, {
   bool checkVersion = false,
@@ -719,7 +834,8 @@ Future<ImportOutcome> _importAppDataLocked(
   bool restoreLocalComics = true,
   bool mergeTranslations = true,
   bool userRestore = false,
-  bool restoreWebdavConfig = true,
+  bool restoreDeviceSettings = false,
+  bool requireTranslationsOnly = false,
 }) async {
   void report(ImportPhase phase, [String? message, int? bytes]) {
     onProgress?.call(phase, message, bytes);
@@ -747,6 +863,9 @@ Future<ImportOutcome> _importAppDataLocked(
     );
     if (cacheDir.joinFile(translationExportMarker).existsSync()) {
       return await _importTranslationPackage(cacheDir, report);
+    }
+    if (requireTranslationsOnly) {
+      throw const FormatException('Expected a translation package');
     }
     var legacySourceTypeMap = _loadLegacySourceTypeMap(
       cacheDir,
@@ -799,8 +918,8 @@ Future<ImportOutcome> _importAppDataLocked(
       // Refresh collection-backed pages immediately after a WebDAV restore;
       // collection settings, including detail display modes, live in appdata.
       ComicCollectionStore.notifyChanged();
-      if (restoreWebdavConfig && data is Map<String, dynamic>) {
-        await _restoreWebdavConfigIfAbsent(data);
+      if (restoreDeviceSettings && data is Map<String, dynamic>) {
+        await _restoreDeviceSettingsIfAbsent(data);
       }
       // Which library each source installs and updates from rides along in the
       // settings. Fold a legacy single-URL library in first so the ids those
@@ -837,6 +956,8 @@ Future<ImportOutcome> _importAppDataLocked(
             'data_sync_tasks',
             'follow_update_active_tasks',
             'follow_update_task_history',
+            'pre_translation_active_tasks',
+            'pre_translation_task_history',
           ];
           final merged = Map<String, dynamic>.from(implicitData);
           for (final key in [
@@ -937,34 +1058,38 @@ Future<ImportOutcome> _importAppDataLocked(
         Log.warning('Import Data', 'Failed to import collection covers: $e\n$s');
       }
     }
-    var comicSourceDir = FilePath.join(cacheDirPath, "comic_source");
-    if (Directory(comicSourceDir).existsSync()) {
+    final incomingSources = Directory(FilePath.join(cacheDirPath, 'comic_source'));
+    final liveDir = Directory(FilePath.join(App.dataPath, 'comic_source'));
+    final sources = ComicSourceManager();
+    if (await incomingSources.exists() &&
+        (sources.isEmpty ||
+            !await comicSourceFilesEqual(incomingSources, liveDir))) {
       report(ImportPhase.reloading);
       // Stage-then-swap. The old delete-then-copy order meant a copy failure
       // midway (disk full, locked file) permanently wiped EVERY installed
       // source together with its login/config .data. Copy into a sibling
       // staging dir first; only after all copies succeed, swap it in.
-      final liveDir = Directory(FilePath.join(App.dataPath, "comic_source"));
       final stagingDir = Directory(
         FilePath.join(App.dataPath, "comic_source.staging"),
       );
-      stagingDir.deleteIfExistsSync(recursive: true);
-      stagingDir.createSync();
-      for (var file in Directory(comicSourceDir).listSync()) {
+      if (await stagingDir.exists()) await stagingDir.delete(recursive: true);
+      await stagingDir.create();
+      await for (var file in incomingSources.list(followLinks: false)) {
         if (file is File) {
           if (file.name.endsWith(".js") || file.name.endsWith(".data")) {
             await file.copy(FilePath.join(stagingDir.path, file.name));
           }
         }
       }
+      // Keep the final swap synchronous so callbacks cannot write between it.
       liveDir.deleteIfExistsSync(recursive: true);
       stagingDir.renameSync(liveDir.path);
-      await ComicSourceManager().reload();
+      await sources.reload();
     } else {
-      // A backup carrying settings but no scripts still brings the restored
-      // source arrangement; without this it would only take effect at the next
-      // restart, since nothing else re-sorts the registered sources.
-      ComicSourceManager().reapplySourceOrder();
+      // Native sources capture settings even when scripts/accounts did not change.
+      sources.refreshWebdavLibrarySources();
+      sources.refreshCollectionSources();
+      sources.reapplySourceOrder();
     }
     return const ImportOutcome();
   } finally {

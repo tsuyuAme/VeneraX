@@ -14,6 +14,7 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import android.view.KeyEvent
+import android.view.WindowManager
 import androidx.activity.result.ActivityResultCallback
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContract
@@ -35,6 +36,13 @@ import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicInteger
 
 class MainActivity : FlutterFragmentActivity() {
+    private val rotationTransition = FlutterRotationTransition(this, { flutterEngine?.renderer })
+
+    override fun onDestroy() {
+        rotationTransition.dispose()
+        super.onDestroy()
+    }
+
     var volumeListen = VolumeListen()
     var listening = false
 
@@ -58,6 +66,11 @@ class MainActivity : FlutterFragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.decorView.post { rotationTransition.attach() }
+        // Crossfade fullscreen rotation instead of stretching the old reader frame.
+        window.attributes = window.attributes.apply {
+            rotationAnimation = WindowManager.LayoutParams.ROTATION_ANIMATION_CROSSFADE
+        }
 
         if (intent?.action == Intent.ACTION_SEND) {
             if (intent.type == "text/plain") {
@@ -132,6 +145,7 @@ class MainActivity : FlutterFragmentActivity() {
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        FollowUpdatesScheduler.registerUi(this, flutterEngine)
         GeneratedPluginRegistrant.registerWith(flutterEngine)
         ReadingWidgets.register(this, flutterEngine.dartExecutor.binaryMessenger)
         MethodChannel(
@@ -164,6 +178,15 @@ class MainActivity : FlutterFragmentActivity() {
                         else
                             onPickedDirectory(pickedDirectoryUri, res)
                     }
+                }
+
+                "getUpdatePackage" -> {
+                    // Store split installs cannot use a standalone APK delta.
+                    res.success(mapOf(
+                        "path" to applicationInfo.sourceDir,
+                        "split" to !applicationInfo.splitSourceDirs.isNullOrEmpty(),
+                        "abis" to android.os.Build.SUPPORTED_ABIS.toList(),
+                    ))
                 }
 
                 "installApk" -> {
@@ -212,6 +235,26 @@ class MainActivity : FlutterFragmentActivity() {
                         .onFailure { Log.w("Venera", "set app shortcuts failed: ${it.message}") }
                         .getOrDefault(false)
                     res.success(ok)
+                }
+
+                "readLastExit" -> {
+                    val withTrace = call.argument<Boolean>("trace") ?: false
+                    // A binder call and, with the trace, a read of up to half a megabyte.
+                    Thread {
+                        val exit = runCatching { ProcessExit.last(applicationContext, withTrace) }
+                            .onFailure { Log.w("Venera", "read last exit failed: ${it.message}") }
+                            .getOrNull()
+                        // The app's own record goes along once, with the exit itself.
+                        val result = if (withTrace) exit else {
+                            val uncaught = UncaughtExceptionRecord.take(applicationContext)
+                            when {
+                                exit != null -> exit + ("uncaught" to uncaught)
+                                uncaught != null -> mapOf("uncaught" to uncaught)
+                                else -> null
+                            }
+                        }
+                        runOnUiThread { res.success(result) }
+                    }.start()
                 }
 
                 else -> res.notImplemented()

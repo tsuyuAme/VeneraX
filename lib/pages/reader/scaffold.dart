@@ -214,18 +214,26 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
     return Stack(
       children: [
         Positioned.fill(
-          // Keep horizontal turns and zoomed pans protected during animations,
-          // when the content below may be absent from pointer hit tests.
+          // Keep page turns, swipe collection and zoomed pans from becoming a
+          // mid-page back gesture, including during content animations.
           child: SwipeRegionMarker(
             active: () {
               final reader = context.reader;
               return (reader.mode != ReaderMode.galleryTopToBottom &&
                       reader.mode != ReaderMode.continuousTopToBottom) ||
+                  (!reader.isOnChapterCommentsPage &&
+                      reader.effectiveSetting('quickCollectImage') == 'Swipe') ||
                   (reader._imageViewController?.isImageZoomed ?? false);
             },
             child: AbsorbPointer(
               absorbing: context.reader.isPageAnimating,
-              child: widget.child,
+              child: ReaderRotationTransition(
+                backgroundColor: context.reader.readerBackgroundColor,
+                enabled:
+                    appdata.settings['einkFullRefresh'] != true &&
+                    appdata.settings['einkRipplePageTurn'] != true,
+                child: widget.child,
+              ),
             ),
           ),
         ),
@@ -474,6 +482,70 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
     return widgets;
   }
 
+  Future<void> _retranslateSelectedPage() async {
+    final reader = context.reader;
+    final eid = reader.eid;
+    final images = reader.images;
+    if (images == null) return;
+    final index = await selectImage();
+    if (!mounted ||
+        reader.eid != eid ||
+        !identical(reader.images, images) ||
+        index == null ||
+        index < 0 ||
+        index >= images.length) {
+      return;
+    }
+    final page = index + 1;
+    final provider = _createImageProviderFromKey(images[index], context, page);
+    final key = provider.translationKey;
+    final config = provider.translationConfig;
+    if (key == null || config == null) return;
+    final service = ImageTranslationService.instance;
+    if (service.statusOf(key, config.mode) == PageTranslationStatus.translating) {
+      context.showMessage(message: 'Translating'.tl);
+      return;
+    }
+    await showConfirmDialog(
+      context: context,
+      title: 'Re-translate this page'.tl,
+      content: 'Translate page @page again? A paid service may charge for this request.'
+          .tlParams({'page': page}),
+      onConfirm: () async {
+        try {
+          final bytes = await provider.loadOriginal();
+          if (!mounted) return;
+          final chapter = ImageTranslationService.chapterIdentity(
+            sourceKey: provider.sourceKey,
+            cid: provider.cid,
+            eid: eid,
+            config: config,
+            comicTitle: provider.comicTitle,
+            chapterTitle: provider.chapterTitle,
+            comicCover: provider.comicCover,
+          );
+          final replaced = await service.retranslatePage(
+            key,
+            '${provider.cid}@${provider.sourceKey}',
+            bytes,
+            config,
+            chapter: chapter,
+            legacyCacheKey: provider.legacyTranslationKey,
+          );
+          if (!mounted) return;
+          if (!replaced) {
+            context.showMessage(
+              message: 'No translatable text found on this page'.tl,
+            );
+          }
+        } catch (e, s) {
+          Log.error('Image Translation', 'Single-page translation failed: $e', s);
+          if (mounted) context.showMessage(message: 'Translation failed'.tl);
+        }
+      },
+    );
+  }
+
   void _retryTranslation(List<String> cacheKeys, InpaintMode mode) {
     final service = ImageTranslationService.instance;
     var error = service.errorOf(cacheKeys.first, mode);
@@ -626,7 +698,7 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
           seconds: 1,
         );
       } else {
-        var imageFavoritesComic =
+        ImageFavoritesComic loadComic() =>
             ImageFavoriteManager().find(id, sourceKey) ??
             ImageFavoritesComic(
               id,
@@ -641,6 +713,7 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
               subTitle,
               maxPage,
             );
+        var imageFavoritesComic = loadComic();
         ImageFavorite imageFavorite = ImageFavorite(
           page,
           imageKey,
@@ -651,11 +724,35 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
           sourceKey,
           epName,
         );
-        ImageFavoritesEp? imageFavoritesEp = imageFavoritesComic
-            .imageFavoritesEp
-            .firstWhereOrNull((e) {
-              return e.ep == ep;
-            });
+        ImageFavoritesEp? savedEp() =>
+            imageFavoritesComic.imageFavoritesEp.firstWhereOrNull(
+              (e) => e.ep == ep,
+            );
+        bool otherVersion(ImageFavoritesEp? e) =>
+            e != null && e.eid != eid && e.eid != "";
+        var imageFavoritesEp = savedEp();
+        if (otherVersion(imageFavoritesEp)) {
+          // Chapters inserted or reordered: saved images follow their ids.
+          final chapters = context.reader.widget.chapters;
+          if (chapters != null &&
+              imageFavoritesComic.remapChaptersById(
+                chapters.ids.toList(),
+                chapters.titles.toList(),
+              )) {
+            ImageFavoriteManager().addOrUpdateOrDelete(imageFavoritesComic);
+            imageFavoritesEp = savedEp();
+          }
+        }
+        if (otherVersion(imageFavoritesEp)) {
+          if (!await _clearReplacedChapter(
+            imageFavoritesComic,
+            imageFavoritesEp!,
+          )) {
+            return;
+          }
+          imageFavoritesComic = loadComic();
+          imageFavoritesEp = savedEp();
+        }
         if (imageFavoritesEp == null) {
           if (page != firstPage &&
               context.reader.effectiveSetting('autoFavoriteCover') == true) {
@@ -683,21 +780,8 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
           }
           imageFavoritesComic.imageFavoritesEp.add(imageFavoritesEp);
         } else {
-          if (imageFavoritesEp.eid != eid) {
-            // 空字符串说明是从pica导入的, 那我们就手动刷一遍保证一致
-            if (imageFavoritesEp.eid == "") {
-              imageFavoritesEp.eid == eid;
-            } else {
-              // 避免多章节漫画源的章节顺序发生变化, 如果情况比较多, 做一个以eid为准更新ep的功能
-              showToast(
-                message:
-                    "The chapter order of the comic may have changed, temporarily not supported for collection"
-                        .tl,
-                context: context,
-              );
-              return;
-            }
-          }
+          // 空字符串说明是从pica导入的, 那我们就手动刷一遍保证一致
+          if (imageFavoritesEp.eid == "") imageFavoritesEp.eid = eid;
           imageFavoritesEp.imageFavorites.add(imageFavorite);
         }
 
@@ -715,10 +799,53 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
     }
   }
 
+  /// The chapter at this position was replaced by another version, and the
+  /// images saved for it are of the old one; a chapter's images all come from
+  /// one version. True once they are deleted.
+  Future<bool> _clearReplacedChapter(
+    ImageFavoritesComic comic,
+    ImageFavoritesEp old,
+  ) async {
+    final delete = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => ContentDialog(
+        title: "This chapter was replaced".tl,
+        content: Text(
+          "The @n images collected from this chapter are from an earlier version of it. Delete them to collect images from the current version."
+              .tlParams({'n': old.imageFavorites.length}),
+        ).paddingHorizontal(16).paddingVertical(8),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: Text("View old images".tl),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text("Delete and collect".tl),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || delete == null) return false;
+    if (!delete) {
+      context.to(() => SingleComicImageFavoritesPage(comic: comic, ep: old.ep));
+      return false;
+    }
+    ImageFavoriteManager().deleteImageFavorite(old.imageFavorites.toList());
+    return true;
+  }
+
   /// Low-frequency actions, folded into the top bar's menu to keep both bars
   /// short: chapter download, desktop fullscreen and share.
   List<MenuEntry> buildMoreMenuEntries() {
     return [
+      if (!context.reader.showOriginalPages &&
+          _currentTranslationTargets() != null)
+        MenuEntry(
+          icon: Icons.g_translate_rounded,
+          text: 'Re-translate this page'.tl,
+          onClick: _retranslateSelectedPage,
+        ),
       if (canDownloadFromReader())
         MenuEntry(
           icon: Icons.download_outlined,

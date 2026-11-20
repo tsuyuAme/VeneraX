@@ -877,27 +877,35 @@ class HistoryManager with ChangeNotifier {
   /// newer of the two carries the reading state; writes go back to that
   /// record, so both devices share it (issue #348).
   History? _preferSyncedLocalRecord(String id, History? own) {
-    final idsByTitle = _localRecordIdsByTitle();
-    if (idsByTitle.isEmpty || !LocalManager().isInitialized) return own;
-    final LocalComic? comic;
-    try {
-      comic = LocalManager().find(id, ComicType.local);
-    } catch (_) {
-      return own;
-    }
-    if (comic == null) return own;
     var best = own;
-    for (final otherId in idsByTitle[comic.title] ?? const <String>[]) {
-      if (otherId == id) continue;
-      if (LocalManager().findSyncedCopy(otherId, comic.title)?.id != id) {
-        continue;
-      }
+    for (final otherId in syncedLocalIds(id)) {
       final other = _findRecord(otherId, ComicType.local);
       if (other != null && (best == null || other.time.isAfter(best.time))) {
         best = other;
       }
     }
     return best;
+  }
+
+  /// Ids other devices recorded this device's local comic [id] under, from
+  /// the synced records [LocalManager.findSyncedCopy] pairs with it.
+  List<String> syncedLocalIds(String id) {
+    if (!isInitialized || _isCorrupted) return const [];
+    final idsByTitle = _localRecordIdsByTitle();
+    if (idsByTitle.isEmpty || !LocalManager().isInitialized) return const [];
+    final LocalComic? comic;
+    try {
+      comic = LocalManager().find(id, ComicType.local);
+    } catch (_) {
+      return const [];
+    }
+    if (comic == null) return const [];
+    return [
+      for (final otherId in idsByTitle[comic.title] ?? const <String>[])
+        if (otherId != id &&
+            LocalManager().findSyncedCopy(otherId, comic.title)?.id == id)
+          otherId,
+    ];
   }
 
   Map<String, List<String>>? _localIdsByTitle;
@@ -961,6 +969,28 @@ class HistoryManager with ChangeNotifier {
       order by time DESC;
     """);
     return res.map((element) => History.fromRow(element)).toList();
+  }
+
+  /// Changes whenever local comics may change order by last read: a record
+  /// added or removed, another one becoming the newest, or any but the newest
+  /// retimed. Reading on in the newest one leaves it as it is.
+  String? localReadOrderKey() {
+    if (!isInitialized || _isCorrupted) return null;
+    try {
+      final row = _db.select(
+        '''
+        select count(*) as n, sum(time) - max(time) as rest,
+          (select id from history where type == ?1
+            order by time desc limit 1) as newest
+        from history where type == ?1;
+        ''',
+        [ComicType.local.value],
+      ).first;
+      return '${row['n']}:${row['rest']}:${row['newest']}';
+    } on SqliteException catch (e) {
+      _handleCorruption(e);
+      return null;
+    }
   }
 
   /// Every comic with reading state or reading time on this device, including
