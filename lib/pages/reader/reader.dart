@@ -209,6 +209,15 @@ class _ReaderState extends State<Reader>
     setState(() {});
   }
 
+  @override
+  bool get locationMounted => mounted;
+
+  @override
+  _ReaderScaffoldState? findReaderScaffold() {
+    if (!mounted) return null;
+    return context.findAncestorStateOfType<_ReaderScaffoldState>();
+  }
+
   /// The maximum page number for images only (excluding chapter comments page).
   /// This is used for display purposes and history recording.
   @override
@@ -1193,6 +1202,12 @@ abstract mixin class _ReaderLocation {
 
   void update();
 
+  /// Provided by [_ReaderState] (State.mounted / context).
+  bool get locationMounted;
+
+  /// Provided by [_ReaderState].
+  _ReaderScaffoldState? findReaderScaffold();
+
   bool enablePageAnimation(String cid, ComicType type) {
     return appdata.settings.getReaderSetting(
       cid,
@@ -1380,6 +1395,8 @@ abstract mixin class _ReaderLocation {
 /// `readerKeepScreenOn` setting.
 abstract mixin class _AutoPageTurner {
   String get cid;
+
+  Timer? autoPageTurningTimer;
 
   ComicType get type;
 

@@ -158,15 +158,16 @@ class _ImageFavoritesItemState extends State<_ImageFavoritesItem> {
 
     return InkWell(
       onTap: () {
-        // 单击去阅读页面, 跳转到当前点击的page
+        // 单击直接进入大图册（从当前图开始翻页浏览）；
+        // 跳转源漫画阅读器改为长按。
         if (widget.multiSelectMode) {
           widget.addSelected(image);
         } else {
-          goReaderPage(widget.imageFavoritesComic, image.ep, curPage);
+          goPhotoView(image);
         }
       },
       onLongPress: () {
-        goPhotoView(image);
+        goReaderPage(widget.imageFavoritesComic, image.ep, curPage);
       },
       borderRadius: BorderRadius.circular(8),
       child: Container(
@@ -295,7 +296,10 @@ class _ImageFavoritesItemState extends State<_ImageFavoritesItem> {
   }
 }
 
-/// 网格布局下的单张图片项（图片平铺模式）
+/// 网格布局下的单张图片项（图片平铺模式）。
+///
+/// [globalComics] 非空时为全局平铺网格（混排全部漫画）：
+/// 单击进入跨漫画全局图册；否则进入该漫画专属图册。
 class _ImageFavoritesGridItem extends StatelessWidget {
   const _ImageFavoritesGridItem({
     super.key,
@@ -304,6 +308,7 @@ class _ImageFavoritesGridItem extends StatelessWidget {
     required this.selectedImageFavorites,
     required this.addSelected,
     required this.multiSelectMode,
+    this.globalComics,
   });
 
   final ImageFavoritesComic comic;
@@ -311,6 +316,7 @@ class _ImageFavoritesGridItem extends StatelessWidget {
   final Map<ImageFavorite, bool> selectedImageFavorites;
   final Function(ImageFavorite) addSelected;
   final bool multiSelectMode;
+  final List<ImageFavoritesComic>? globalComics;
 
   void goReaderPage() {
     App.rootContext.to(
@@ -324,12 +330,19 @@ class _ImageFavoritesGridItem extends StatelessWidget {
   }
 
   void goPhotoView() {
-    Navigator.of(App.rootContext).push(MaterialPageRoute(
-      builder: (context) => ImageFavoritesPhotoView(
-        comic: comic,
-        imageFavorite: image,
+    Navigator.of(App.rootContext).push(
+      MaterialPageRoute(
+        builder: (context) => globalComics != null
+            ? ImageFavoritesPhotoView.global(
+                comics: globalComics!,
+                initialImage: image,
+              )
+            : ImageFavoritesPhotoView(
+                comic: comic,
+                imageFavorite: image,
+              ),
       ),
-    ));
+    );
   }
 
   @override
@@ -337,17 +350,18 @@ class _ImageFavoritesGridItem extends StatelessWidget {
     bool isSelected = selectedImageFavorites[image] ?? false;
     return InkWell(
       onTap: () {
+        // 单击进入大图册（从当前图开始翻页）；长按跳转源漫画阅读器。
         if (multiSelectMode) {
           addSelected(image);
         } else {
-          goReaderPage();
+          goPhotoView();
         }
       },
       onLongPress: () {
         if (multiSelectMode) {
           addSelected(image);
         } else {
-          goPhotoView();
+          goReaderPage();
         }
       },
       onSecondaryTapDown: (_) => addSelected(image),

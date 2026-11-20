@@ -305,6 +305,11 @@ class ComicDetails with HistoryMixin {
     if (updateTime != null) {
       return _validateUpdateTime(updateTime!);
     }
+    // Sources that only know the posting date (e.g. E-Hentai's uploadTime)
+    // have no separate update time — the posted date is the best "time" row.
+    if (uploadTime != null) {
+      return _validateUpdateTime(uploadTime!);
+    }
     const acceptedNamespaces = [
       "更新",
       "最後更新",

@@ -536,7 +536,11 @@ class ComicListState extends State<ComicList> {
       }
     } finally {
       _loading[page] = false;
-      storeState();
+      // The page may have been disposed while the request was in flight;
+      // State.context is null then and PageStorage.of would throw.
+      if (mounted) {
+        storeState();
+      }
     }
   }
 

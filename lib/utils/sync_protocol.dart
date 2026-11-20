@@ -95,6 +95,25 @@ int maxBackupVersion(Iterable<String?> fileNames) {
   return max;
 }
 
+/// [fileNames] with known-corrupt backups removed.
+///
+/// A failed (truncated) upload can leave an unreadable backup on the server
+/// stamped with the highest version. If the version logic still counts it,
+/// every device reads "local behind server", pulls the corrupt file, fails to
+/// import it, and auto-uploads stay skipped forever — the fleet deadlocks on
+/// "Backup file is corrupted or unsupported" (see [shouldSkipStaleUpload] and
+/// [maxBackupVersion]). Treating recorded-corrupt files as invisible lets the
+/// device with the freshest local data re-publish instead. Pure function.
+List<String?> usableBackupFileNames(
+  Iterable<String?> fileNames,
+  Set<String> corruptFileNames,
+) {
+  if (corruptFileNames.isEmpty) return fileNames.toList();
+  return fileNames
+      .where((name) => name == null || !corruptFileNames.contains(name))
+      .toList();
+}
+
 /// Whether the newest backup on the server is the very file this device
 /// uploaded but never confirmed (#133).
 ///

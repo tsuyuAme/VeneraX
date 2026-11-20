@@ -203,9 +203,6 @@ class ComicTile extends StatelessWidget {
 
   /// Whether the tile shows a page count. Never for a collection: its members
   /// each have their own count, so a single number there would be meaningless.
-  bool get _showPageCount =>
-      !_isCollection && appdata.settings['showPageCountOnTile'] == true;
-
   /// Corner marker drawn over the cover of a collection, in both display modes:
   /// the text badge only exists in detailed mode, and a cover marker is what
   /// makes a collection recognisable at a glance either way.
@@ -808,9 +805,8 @@ class ComicTile extends StatelessWidget {
                         updateText: displayInfo.updateTime,
                         statusText: displayInfo.status,
                         progressText: chapterProgress.currentTitle,
-                        pagesText: _showPageCount
-                            ? displayInfo.pagesText
-                            : null,
+                        // List tiles: never show page count (keep room for tags).
+                        pagesText: null,
                       ),
                     ),
                   ],
@@ -902,20 +898,6 @@ class ComicTile extends StatelessWidget {
                         if (lines.length > 3) {
                           lines = lines.sublist(0, 3);
                         }
-                        final pageCount = _showPageCount
-                            ? const ComicStateRepository().quickPageCountFor(
-                                comic,
-                              )
-                            : null;
-                        // Prepended after the description was already trimmed to
-                        // its 3 lines, so the count adds a line instead of
-                        // costing one. Sources that already spell the count into
-                        // the description would otherwise say it twice.
-                        if (pageCount != null &&
-                            !lines.any((e) => e.containsNumber(pageCount))) {
-                          lines.insert(0, '${pageCount}P');
-                        }
-
                         if (lines.isEmpty) {
                           return const SizedBox();
                         }

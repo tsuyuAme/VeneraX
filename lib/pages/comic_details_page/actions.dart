@@ -71,9 +71,10 @@ abstract mixin class _ComicPageActions {
       rawTags.addAll(e.value.map((tag) => '${e.key}:$tag'));
     }
     final buckets = splitFavoriteTags(rawTags);
-    final author = buckets.authors.isNotEmpty
-        ? buckets.authors.join(', ')
-        : (comic.subTitle ?? comic.uploader ?? '');
+    // Author comes from real author/artist tags only. No subtitle/uploader
+    // fallback: an empty author keeps the tile's author row hidden instead
+    // of storing a wrong name (e.g. the Japanese title on E-Hentai).
+    final author = buckets.authors.join(', ');
     return FavoriteItem(
       id: comic.id,
       name: comic.title,
@@ -576,7 +577,40 @@ abstract mixin class _ComicPageActions {
     update();
   }
 
-  void onTapTag(String tag, String namespace) {
+  
+  void onLongPressTag(String tag, String namespace, BuildContext tagContext) {
+    final renderBox = tagContext.findRenderObject() as RenderBox?;
+    if (renderBox == null) return;
+    final offset = renderBox.localToGlobal(Offset.zero);
+    final source = comicSource;
+    final canSearch = source?.handleClickTagEvent != null ||
+        source?.searchPageData != null;
+    SearchShortcut? shortcut;
+    if (source != null && canSearch) {
+      final isAuthor = isAuthorNamespace(namespace);
+      final display = isAuthor
+          ? resolveAuthorFavoriteName(tag, namespace)
+          : tag;
+      shortcut = SearchShortcut(
+        kind: isAuthor ? SearchShortcutKind.author : SearchShortcutKind.tag,
+        sourceKey: source.key,
+        namespace: namespace,
+        value: display,
+        rawValue: display != tag ? tag : null,
+      );
+    }
+    showSearchShortcutMenu(
+      context: tagContext,
+      location: Offset(
+        offset.dx + renderBox.size.width / 2 - 121,
+        offset.dy + renderBox.size.height - 8,
+      ),
+      copyText: tag,
+      shortcut: shortcut,
+    );
+  }
+
+void onTapTag(String tag, String namespace) {
     final source = comicSource;
     var target = source?.handleClickTagEvent?.call(namespace, tag);
     var context = App.mainNavigatorKey!.currentContext!;

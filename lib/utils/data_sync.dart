@@ -318,6 +318,48 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
     }
   }
 
+  /// WebDAV backups this device downloaded and found unreadable (typically a
+  /// truncated upload that a server committed as a partial body). Recorded so
+  /// the sync protocol treats them as INVISIBLE: backup selection and the
+  /// version logic skip them, which lets the fleet self-heal — the device
+  /// holding the freshest local data is no longer told it is "behind" a file
+  /// it can never import, and re-publishes a good snapshot. Without this the
+  /// corrupt newest backup deadlocks every device into
+  /// "Skipped: local behind server → download → Backup file is corrupted"
+  /// forever. Entries are pruned against the server listing on every sync and
+  /// the record is device-local, capped, never synced.
+  static const _corruptBackupsKey = 'webdavCorruptBackupNames';
+  static const _corruptBackupsCap = 20;
+
+  Set<String> get _corruptBackups {
+    final v = appdata.implicitData[_corruptBackupsKey];
+    if (v is! List) return {};
+    return v.map((e) => e.toString()).toSet();
+  }
+
+  void _recordCorruptBackup(String fileName) {
+    final names = _corruptBackups.toList();
+    if (!names.contains(fileName)) {
+      names.add(fileName);
+    }
+    while (names.length > _corruptBackupsCap) {
+      names.removeAt(0);
+    }
+    appdata.implicitData[_corruptBackupsKey] = names;
+    appdata.writeImplicitData();
+  }
+
+  void _pruneCorruptBackups(Iterable<String?> serverFileNames) {
+    final corrupt = _corruptBackups;
+    if (corrupt.isEmpty) return;
+    final server = serverFileNames.whereType<String>().toSet();
+    final kept = corrupt.intersection(server);
+    if (kept.length != corrupt.length) {
+      appdata.implicitData[_corruptBackupsKey] = kept.toList();
+      appdata.writeImplicitData();
+    }
+  }
+
   /// Uploads the pending account if one is open. Automatic settle
   /// points all funnel here: background/screen-off (Android), resume,
   /// startup, the [_dataSaverMaxPendingAge] cap, desktop window close and
@@ -547,12 +589,18 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
   /// essential: once the version crosses into two digits, string ordering
   /// ranks `...-9.venera` above `...-10.venera`, which used to make a stale
   /// backup look newer and reverse the sync direction.
+  ///
+  /// Known-corrupt backups (see [_corruptBackups]) are skipped, so this
+  /// returns the newest USABLE backup: a truncated upload must not be picked
+  /// for download, and the fleet must be able to route around it.
   T? _latestBackup<T>(List<T> files, String? Function(T) nameOf) {
+    final corrupt = _corruptBackups;
     T? best;
     var bestVersion = -1;
     for (final f in files) {
       var name = nameOf(f);
       if (name == null || !name.endsWith('.venera')) continue;
+      if (corrupt.contains(name)) continue;
       var v = _versionOfFileName(name);
       if (v > bestVersion) {
         bestVersion = v;
@@ -581,6 +629,70 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
       }
     } catch (_) {}
     return false;
+  }
+
+  /// Size the server reports for [fileName] after an upload, or null when it
+  /// cannot be judged (entry missing, no size reported, listing failure).
+  ///
+  /// Used on the upload SUCCESS path to detect a silent mid-stream
+  /// truncation that the PUT itself reported as success: the server may
+  /// commit a partial streamed body and still answer 200. Size — not a
+  /// checksum — is the only integrity signal plain WebDAV reliably offers.
+  Future<int?> _uploadedFileSize(Client client, String fileName) async {
+    try {
+      final files = await client.readDir('/');
+      for (final f in files) {
+        if (f.name == fileName) {
+          return f.size;
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Deletes a failed upload's leftover file when the server demonstrably
+  /// holds a truncated copy (size known and different from the expected one).
+  ///
+  /// A partial body committed by the server carries the failed upload's
+  /// version stamp — the highest on the server — while its content is
+  /// unreadable; leaving it in place turns every later sync into
+  /// "behind server → pull → Backup file is corrupted" until a manual force
+  /// upload. Best-effort: errors are logged and swallowed, and when the
+  /// server reports no size the file is left for the pending-publish
+  /// reconciliation instead (deleting an intact-but-unconfirmed backup would
+  /// destroy a publish that did land).
+  Future<void> _removeTruncatedUpload(
+    Client client,
+    String fileName,
+    int expectedSize,
+  ) async {
+    try {
+      final files = await client.readDir('/');
+      for (final f in files) {
+        if (f.name == fileName) {
+          if (f.size == null) {
+            Log.info(
+              "Upload Data",
+              "Upload left '$fileName' but the server reports no size; "
+                  "leaving it for pending-publish reconciliation",
+            );
+            return;
+          }
+          if (f.size == expectedSize) {
+            return;
+          }
+          await client.remove(fileName);
+          Log.warning(
+            "Upload Data",
+            "Deleted truncated upload '$fileName' "
+                "(${f.size} of $expectedSize bytes landed)",
+          );
+          return;
+        }
+      }
+    } catch (e) {
+      Log.warning("Upload Data", "Failed to clean up truncated upload: $e");
+    }
   }
 
   bool get initialRestoreDeferred =>
@@ -790,7 +902,13 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
         // and never auto-pulled (#80).
         var files = await client.readDir('/');
         files = files.where((e) => e.name!.endsWith('.venera')).toList();
-        final remoteMax = maxBackupVersion(files.map((e) => e.name));
+        _pruneCorruptBackups(files.map((e) => e.name));
+        // Known-corrupt backups do not count as "newer server data": a
+        // truncated upload otherwise makes this device believe it is behind
+        // forever (see [_corruptBackups]).
+        final remoteMax = maxBackupVersion(
+          usableBackupFileNames(files.map((e) => e.name), _corruptBackups),
+        );
 
         // Fall-behind guard (auto uploads only). If the server already holds a
         // newer backup than this device, we are behind — uploading now would
@@ -904,7 +1022,7 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
         // re-uploads the reverted state, spreading it fleet-wide.
         // downloadData() consults the record and reclaims the orphan instead.
         _setPendingPublish(filename, fileSize);
-        try {
+        Future<void> performPut() async {
           final remotePath = serverAbsoluteWebdavPath(filename);
           final usedBufferedFallback = await BackgroundKeepAlive.instance.runTransfer(
             formatTaskStatus(title: 'Uploading data'.tl, detail: filename),
@@ -924,13 +1042,61 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
               "Streamed PUT returned 404; buffered compatibility upload succeeded",
             );
           }
+        }
+        try {
+          await performPut();
+          // A PUT can report success while the server only committed part of
+          // the body — an interrupted stream answered with 200. That silently
+          // publishes a corrupt backup stamped with the highest version (the
+          // client-side error path never runs), and the fleet later deadlocks
+          // on "Backup file is corrupted or unsupported". Verify the landed
+          // size and re-upload when it is demonstrably short. WebDAV has no
+          // standard checksum, so the server-reported size is the signal;
+          // a null verdict (missing entry, no size, listing failure) keeps
+          // the historical accept-it behavior instead of guessing.
+          for (var attempt = 1;; attempt++) {
+            final landedSize = await _uploadedFileSize(client, filename);
+            if (landedSize == null || landedSize == fileSize) break;
+            if (attempt >= 3) {
+              // Out of retries: remove the truncated file so the server keeps
+              // its previous good backups, then fail. The version is NOT
+              // adopted and the pending-publish record drives reconciliation.
+              await _removeTruncatedUpload(client, filename, fileSize);
+              throw 'Upload incomplete after $attempt attempts: server holds '
+                  '$landedSize of $fileSize bytes';
+            }
+            Log.warning(
+              "Upload Data",
+              "Upload attempt $attempt was truncated "
+                  "($landedSize of $fileSize bytes landed); retrying",
+            );
+            // Short backoff before retrying: truncation usually means the
+            // path is congested or the connection is half-dead, and an
+            // immediate re-PUT tends to repeat it. Realtime mode may fire
+            // uploads back-to-back on active use, so keep the added wall
+            // time small.
+            await Future.delayed(Duration(seconds: attempt * 2));
+            await performPut();
+          }
         } catch (e) {
           // The PUT may have succeeded even though its response was lost.
           // Probe once: if the backup is on the server with the expected
           // size, the publish landed — continue as success so the version is
           // adopted and no orphan is left. Probe failure keeps the persisted
           // record for downloadData to reconcile later.
-          if (!await _publishLanded(client, filename, fileSize)) rethrow;
+          if (!await _publishLanded(client, filename, fileSize)) {
+            // The publish did not land intact. If a TRUNCATED copy did land
+            // (some servers commit a partial streamed body and answer 200),
+            // it still carries `nextVersion` — the highest version stamp on
+            // the server — and poisons every later direction decision: the
+            // next sync reads "local behind server", pulls the unreadable
+            // file, and the fleet deadlocks on "Backup file is corrupted or
+            // unsupported". Delete the partial file so the server keeps its
+            // previous good backups; the local data is untouched and the
+            // next upload re-publishes the same version.
+            await _removeTruncatedUpload(client, filename, fileSize);
+            rethrow;
+          }
           Log.info(
             "Upload Data",
             "PUT reported failure but the backup landed on the server; "
@@ -1074,10 +1240,15 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
         adapter: _syncAdapter(_syncRequestTimeout),
       );
 
+      // The name of the backup selected for download; consulted by the catch
+      // below to record server-side corruption (see [_corruptBackups]).
+      String? latestBackupName;
+
       try {
         taskManager.updateTask(task.id, currentPhase: 'Checking', progress: 0.1);
 
         var files = await client.readDir('/');
+        _pruneCorruptBackups(files.map((e) => e.name));
         var file = _latestBackup(files, (e) => e.name);
         if (file == null) {
           // Empty server: nothing to pull, and there never will be until
@@ -1091,6 +1262,7 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
           taskManager.completeTask(task.id);
           return const Res(true);
         }
+        latestBackupName = file.name;
         // Reconcile an unconfirmed upload (#133): when the newest backup on
         // the server is the very file this device PUT but never confirmed,
         // its content is our own PAST snapshot — current local data already
@@ -1162,6 +1334,17 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
             ),
           );
 
+          // Detect a truncated DOWNLOAD before applying it: the server's
+          // listed size describes a complete backup, so a mismatch means the
+          // transfer was cut short. Failing here (instead of letting the zip
+          // reader fail) keeps this file out of the corrupt-backup record —
+          // the server copy may be perfectly fine and worth retrying.
+          final downloadedSize = await localFile.length();
+          if (file.size != null && downloadedSize != file.size) {
+            throw 'Download incomplete: received $downloadedSize of '
+                '${file.size} bytes';
+          }
+
           taskManager.updateTask(task.id, currentPhase: 'Applying', progress: 0.6);
 
           // applyBackup suppresses the echo: applying re-inits the favorites/
@@ -1220,6 +1403,22 @@ class DataSync with ChangeNotifier, WidgetsBindingObserver {
         }
       } catch (e, s) {
         Log.error("Data Sync", e, s);
+        // Remember corrupt server backups so the protocol routes around them
+        // (see [_corruptBackups]). Only the zip-corruption class counts: a
+        // network failure leaves the server file untouched and must not mark
+        // it — download truncation is caught separately by the size check
+        // before the archive is ever opened.
+        final name = latestBackupName;
+        if (name != null &&
+            e is ImportException &&
+            e.messageKey == 'Backup file is corrupted or unsupported') {
+          _recordCorruptBackup(name);
+          Log.warning(
+            "Data Sync",
+            "Recorded '$name' as corrupt; sync will use the newest valid "
+                "backup instead",
+          );
+        }
         _lastError = e.toString();
         _addSyncLog('download', null, false, e.toString());
         taskManager.failTask(task.id, e.toString());

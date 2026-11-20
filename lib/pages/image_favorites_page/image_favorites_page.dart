@@ -222,6 +222,19 @@ class _ImageFavoritesPageState extends State<ImageFavoritesPage> {
     return result;
   }
 
+  /// 跨漫画全局图册：按当前排序/筛选后的漫画列表混排翻页浏览全部收藏图。
+  void openGlobalAlbum() {
+    if (comics.isEmpty) return;
+    Navigator.of(App.rootContext).push(
+      MaterialPageRoute(
+        builder: (context) => ImageFavoritesPhotoView.global(
+          comics: comics,
+          initialImage: comics.first.images.firstOrNull,
+        ),
+      ),
+    );
+  }
+
   void selectAll() {
     for (var c in comics) {
       for (var i in c.images) {
@@ -285,6 +298,13 @@ class _ImageFavoritesPageState extends State<ImageFavoritesPage> {
                     });
                     _saveViewMode();
                   },
+                ),
+              ),
+              Tooltip(
+                message: "Global Album".tl,
+                child: IconButton(
+                  icon: const Icon(Icons.photo_library_outlined),
+                  onPressed: openGlobalAlbum,
                 ),
               ),
               Tooltip(
@@ -440,6 +460,9 @@ class _ImageFavoritesPageState extends State<ImageFavoritesPage> {
           key: ValueKey(_gridItemKey(items[index])),
           comic: items[index].$1,
           image: items[index].$2,
+          // 平铺网格混排了全部漫画：单击进入跨漫画全局图册，
+          // 从当前图开始翻页。
+          globalComics: comics,
           selectedImageFavorites: selectedImageFavorites,
           addSelected: addSelected,
           multiSelectMode: multiSelectMode,
